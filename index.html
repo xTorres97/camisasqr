@@ -7,13 +7,53 @@
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
     #videoWrapper{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
-    /* <- QUITAMOS el transform:scaleX(-1); para evitar efecto espejo */
+    
+    /* Cámara sin espejo */
     video#cam{width:100%;height:100%;object-fit:cover;}
-    canvas#overlay{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none; z-index:20}
-    #fxVideo{position:fixed; left:0; top:0; transform-origin:center center; display:none; pointer-events:none; z-index:30;}
-    #startBtn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 18px;background:#ff4fa8;border-radius:10px;border:none;color:#fff;font-size:18px;z-index:40}
-    #note{position:fixed;left:0;right:0;bottom:10px;text-align:center;z-index:40;opacity:0.9}
-    #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:40}
+    
+    canvas#overlay{
+      position:fixed;
+      left:0;top:0;
+      width:100%;height:100%;
+      pointer-events:none;
+      z-index:20;
+    }
+
+    #fxVideo{
+      position:fixed;
+      left:0; top:0;
+      transform-origin:center center;
+      display:none;
+      pointer-events:none;
+      z-index:30;
+    }
+
+    #startBtn{
+      position:fixed;
+      left:50%;top:50%;
+      transform:translate(-50%,-50%);
+      padding:14px 18px;
+      background:#ff4fa8;border-radius:10px;
+      border:none;color:#fff;
+      font-size:18px;
+      z-index:40
+    }
+
+    #note{
+      position:fixed;
+      left:0;right:0;bottom:10px;
+      text-align:center;z-index:40;opacity:0.9
+    }
+
+    #log{
+      position:fixed;
+      left:8px;top:8px;
+      background:rgba(0,0,0,0.6);
+      padding:6px 8px;
+      border-radius:6px;
+      font-size:12px;
+      z-index:40;
+    }
   </style>
 </head>
 <body>
@@ -22,7 +62,7 @@
     <canvas id="overlay"></canvas>
   </div>
 
-  <!-- Video de efecto (tu archivo). Debes subir animacion.webm a la misma carpeta -->
+  <!-- ANIMACION WEBM -->
   <video id="fxVideo" autoplay loop muted playsinline preload="auto" style="will-change:transform;">
     <source src="./animacion.webm" type="video/webm">
   </video>
@@ -32,13 +72,13 @@
   <div id="log">listo</div>
 
   <!-- OpenCV.js -->
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV cargado')"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 
 <script>
 /* ========== CONFIG ========== */
-const TARGET_URL = './target.png';   // Debe existir en la misma carpeta
-let MATCH_THRESHOLD = 0.65;          // Ajusta entre 0.55 - 0.80 según pruebas
-let RES_SCALE = 0.6;                 // 0.5-0.8; aumenta si template > proc area
+const TARGET_URL = './target.png';
+let MATCH_THRESHOLD = 0.55;  
+let RES_SCALE = 0.6;
 /* ============================ */
 
 const cam = document.getElementById('cam');
@@ -51,75 +91,95 @@ const fxVideo = document.getElementById('fxVideo');
 let videoStream = null;
 let streaming = false;
 
-// OpenCV mats
 let srcMat = null, grayMat = null, templMat = null, templGray = null, resMat = null;
 let procCanvas = null, procCtx = null;
 let animStart = null;
 
 function log(s){ logEl.textContent = s; console.log(s); }
 
-/* ---------- Animación fallback (canvas heart) ---------- */
-function drawHeart(x, y, w, h, t){
-  // center x,y (px), w,h (px)
-  const maxR = Math.min(w,h) * 0.5;
-  const pulse = 0.85 + 0.25 * Math.sin(t/200);
-  const r = maxR * pulse;
-  // glow
-  ctx.save();
-  const grad = ctx.createRadialGradient(x, y, r*0.1, x, y, r*1.3);
-  grad.addColorStop(0, 'rgba(255,122,200,0.95)');
-  grad.addColorStop(0.5, 'rgba(255,122,200,0.45)');
-  grad.addColorStop(1, 'rgba(255,122,200,0.0)');
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(x, y, r*1.4, 0, Math.PI*2);
-  ctx.fill();
-
-  ctx.translate(x, y);
-  ctx.scale(r/50, r/50);
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.bezierCurveTo(0, -25, -50, -25, -50, 0);
-  ctx.bezierCurveTo(-50, 30, -20, 55, 0, 75);
-  ctx.bezierCurveTo(20, 55, 50, 30, 50, 0);
-  ctx.bezierCurveTo(50, -25, 0, -25, 0, 0);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(255,120,200,0.95)';
-  ctx.fill();
-  ctx.restore();
+/* =============================== */
+/*  BOTÓN EXTRA SI FALLA AUTOPLAY  */
+/* =============================== */
+function showPlayHint(){
+  if (document.getElementById('playHint')) return;
+  const b = document.createElement('button');
+  b.id = 'playHint';
+  b.textContent = 'Toca para reproducir animación';
+  Object.assign(b.style, {
+    position:'fixed',
+    left:'50%',top:'70%',
+    transform:'translate(-50%,-50%)',
+    zIndex:99999,
+    padding:'12px 18px',
+    background:'#ff4fa8',
+    color:'#fff',
+    border:'none',
+    borderRadius:'8px',
+    fontSize:'16px'
+  });
+  b.onclick = () => {
+    fxVideo.play().catch(()=>{});
+    b.remove();
+  };
+  document.body.appendChild(b);
 }
 
-/* ---------- Video overlay control (no mirror math) ---------- */
+/* ========================= */
+/*     VIDEO SUPERPUESTO     */
+/* ========================= */
 function showVideoOverlay(cx, cy, w, h){
   if (!fxVideo) return;
-  // cx,cy center in overlay canvas coords
+
+  log("Mostrando video — readyState:" + fxVideo.readyState + " paused:" + fxVideo.paused);
+
   const left = cx - w/2;
   const top = cy - h/2;
-  // overlay bounding box on screen (in px)
+
   const rect = overlay.getBoundingClientRect();
-  // set video style absolute on screen
-  fxVideo.style.display = 'block';
-  fxVideo.style.width = Math.max(10, w) + 'px';
-  fxVideo.style.height = Math.max(10, h) + 'px';
-  fxVideo.style.left = (rect.left + left) + 'px';
-  fxVideo.style.top = (rect.top + top) + 'px';
-  fxVideo.style.objectFit = 'contain';
-  // start playing if paused
+
+  const absLeft = rect.left + left + window.scrollX;
+  const absTop  = rect.top  + top  + window.scrollY;
+
+  Object.assign(fxVideo.style, {
+    position:'fixed',
+    display:'block',
+    zIndex:9999,
+    pointerEvents:'none',
+    left: absLeft + 'px',
+    top: absTop + 'px',
+    width: Math.max(10, w) + 'px',
+    height: Math.max(10, h) + 'px',
+    objectFit:'contain',
+    visibility:'visible',
+    transformOrigin:'center center'
+  });
+
   if (fxVideo.paused) {
-    fxVideo.play().catch(()=>{ /* autoplay policy fallback */});
+    fxVideo.play().then(()=>{
+      log("Video reproducido correctamente.");
+    }).catch(err=>{
+      log("No se pudo reproducir video automáticamente: " + err);
+      showPlayHint();
+    });
   }
 }
 
 function hideVideoOverlay(){
   if (!fxVideo) return;
-  fxVideo.pause();
+  try{ fxVideo.pause(); }catch(e){}
   fxVideo.style.display = 'none';
+  fxVideo.style.visibility = 'hidden';
 }
 
-/* ---------- Cámara ---------- */
+/* ========================= */
+/*         CÁMARA            */
+/* ========================= */
 async function startCamera(){
   try {
-    videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment'},
+      audio:false
+    });
     cam.srcObject = videoStream;
     await cam.play();
     streaming = true;
@@ -127,13 +187,12 @@ async function startCamera(){
     prepareOpenCV();
   } catch(e){
     alert('Error al abrir la cámara: ' + e.message);
-    console.error(e);
   }
 }
 
 function stopCamera(){
-  if (videoStream) {
-    videoStream.getTracks().forEach(t => t.stop());
+  if (videoStream){
+    videoStream.getTracks().forEach(t=>t.stop());
     streaming = false;
   }
 }
@@ -145,187 +204,188 @@ function resizeCanvas(){
   overlay.style.height = cam.clientHeight + 'px';
 }
 
-/* ---------- Preparar OpenCV y template (robusto) ---------- */
+/* ========================= */
+/*   PREPARAR OPENCV         */
+/* ========================= */
 async function prepareOpenCV(){
-  log('Esperando OpenCV...');
-  if (typeof cv === 'undefined' || !cv.imread){
+  log("Esperando OpenCV...");
+  if (typeof cv === "undefined" || !cv.imread){
     let waited=0;
-    while((typeof cv === 'undefined' || !cv.imread) && waited < 5000){
+    while((typeof cv === "undefined" || !cv.imread) && waited<5000){
       await new Promise(r=>setTimeout(r,100));
-      waited += 100;
+      waited+=100;
     }
   }
-  if (typeof cv === 'undefined' || !cv.imread){
-    alert('OpenCV no se cargó. Recarga la página.');
+
+  if (typeof cv === "undefined" || !cv.imread){
+    alert("OpenCV no cargó");
     return;
   }
 
-  log('OpenCV listo — cargando template...');
+  log("OpenCV listo — Cargando template...");
   const img = new Image();
   img.crossOrigin = "anonymous";
-  img.src = TARGET_URL + '?v=' + Date.now();
+  img.src = TARGET_URL + "?v=" + Date.now();
+
   img.onload = () => {
-    // crear canvas temporal para leer template
     const tmp = document.createElement('canvas');
-    tmp.width = img.width; tmp.height = img.height;
+    tmp.width = img.width;
+    tmp.height = img.height;
     const tctx = tmp.getContext('2d');
     tctx.drawImage(img, 0, 0);
-    if (templMat) { templMat.delete(); templMat = null; }
-    if (templGray) { templGray.delete(); templGray = null; }
+
+    if (templMat) templMat.delete();
+    if (templGray) templGray.delete();
 
     templMat = cv.imread(tmp);
     templGray = new cv.Mat();
     cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
 
-    // preparar canvas de procesamiento reducido
-    const procCanvasW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
-    const procCanvasH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+    const pW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
+    const pH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+
     procCanvas = document.createElement('canvas');
-    procCanvas.width = procCanvasW;
-    procCanvas.height = procCanvasH;
-    procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+    procCanvas.width = pW;
+    procCanvas.height = pH;
+    procCtx = procCanvas.getContext('2d',{willReadFrequently:true});
 
-    // inicializar mats reducidos
-    if (srcMat) { srcMat.delete(); srcMat = null; }
-    if (grayMat) { grayMat.delete(); grayMat = null; }
-    if (resMat) { resMat.delete(); resMat = null; }
+    if (srcMat) srcMat.delete();
+    if (grayMat) grayMat.delete();
+    if (resMat) resMat.delete();
 
-    srcMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC4);
-    grayMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC1);
+    srcMat = new cv.Mat(pH, pW, cv.CV_8UC4);
+    grayMat = new cv.Mat(pH, pW, cv.CV_8UC1);
 
-    const resW = procCanvasW - templGray.cols + 1;
-    const resH = procCanvasH - templGray.rows + 1;
-    if (resW > 0 && resH > 0) {
+    const resW = pW - templGray.cols + 1;
+    const resH = pH - templGray.rows + 1;
+
+    if (resW > 0 && resH > 0){
       resMat = new cv.Mat(resH, resW, cv.CV_32FC1);
-      log('Template cargado: ' + templMat.cols + 'x' + templMat.rows + ' — procesando a ' + procCanvasW + 'x' + procCanvasH);
+      log("Template cargado: " + templMat.cols + "x" + templMat.rows);
     } else {
       resMat = null;
-      log('AVISO: el template (' + templGray.cols + 'x' + templGray.rows + ') es mayor que la zona de procesamiento (' + procCanvasW + 'x' + procCanvasH + '). Aumenta RES_SCALE o recorta target.png');
+      log("Template demasiado grande para área procesada.");
     }
 
     animStart = performance.now();
     requestAnimationFrame(processFrame);
   };
-  img.onerror = (e) => {
-    alert('No se pudo cargar target.png desde: ' + TARGET_URL);
+
+  img.onerror = e => {
+    alert("No se pudo cargar target.png");
     console.error(e);
   };
 }
 
-/* ---------- Procesamiento por frame (seguro) ---------- */
+/* ========================= */
+/*      PROCESAR FRAME       */
+/* ========================= */
 function processFrame(now){
   if (!streaming) return;
+
   try {
-    // reajustar si el video cambió resolución
-    const neededW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
-    const neededH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
-    if (!procCanvas || procCanvas.width !== neededW || procCanvas.height !== neededH) {
-      // liberar y recrear mats
-      if (srcMat) { srcMat.delete(); srcMat = null; }
-      if (grayMat) { grayMat.delete(); grayMat = null; }
-      if (resMat) { resMat.delete(); resMat = null; }
+    const pW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
+    const pH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+
+    if (!procCanvas || procCanvas.width!==pW || procCanvas.height!==pH){
+      if (srcMat) srcMat.delete();
+      if (grayMat) grayMat.delete();
+      if (resMat) resMat.delete();
 
       procCanvas = document.createElement('canvas');
-      procCanvas.width = neededW;
-      procCanvas.height = neededH;
-      procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+      procCanvas.width = pW;
+      procCanvas.height = pH;
+      procCtx = procCanvas.getContext('2d',{willReadFrequently:true});
 
-      srcMat = new cv.Mat(neededH, neededW, cv.CV_8UC4);
-      grayMat = new cv.Mat(neededH, neededW, cv.CV_8UC1);
+      srcMat = new cv.Mat(pH, pW, cv.CV_8UC4);
+      grayMat = new cv.Mat(pH, pW, cv.CV_8UC1);
 
-      const resW = neededW - (templGray ? templGray.cols : 0) + 1;
-      const resH = neededH - (templGray ? templGray.rows : 0) + 1;
-      if (resW > 0 && resH > 0) {
+      const resW = pW - (templGray?templGray.cols:0) + 1;
+      const resH = pH - (templGray?templGray.rows:0) + 1;
+
+      if (resW>0 && resH>0){
         resMat = new cv.Mat(resH, resW, cv.CV_32FC1);
-      } else {
-        resMat = null;
-      }
-      log('Reiniciado procesador: ' + neededW + 'x' + neededH + ' (resMat ' + (resMat ? 'ok' : 'INVALID') + ')');
+      } else resMat = null;
+
+      log("Reiniciado procesado: " + pW + "x" + pH);
     }
 
-    // dibujar video reducido
-    procCtx.drawImage(cam, 0, 0, procCanvas.width, procCanvas.height);
+    procCtx.drawImage(cam,0,0,pW,pH);
 
-    // actualizar srcMat (eficiente)
-    const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
-    if (srcMat && srcMat.data && srcMat.data.length === imageData.data.length) {
+    const imageData = procCtx.getImageData(0,0,pW,pH);
+    if (srcMat.data.length===imageData.data.length){
       srcMat.data.set(imageData.data);
     } else {
       srcMat = cv.imread(procCanvas);
     }
 
-    // convertir a gris
     cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
 
-    // si resMat inválida, no ejecutar matchTemplate
-    if (!resMat || resMat.rows <= 0 || resMat.cols <= 0) {
-      ctx.clearRect(0,0,overlay.width, overlay.height);
-      ctx.fillStyle = 'white'; ctx.font = '14px Arial';
-      ctx.fillText('Template too large for processing area. Increase RES_SCALE or use a smaller template.', 10, 24);
+    if (!resMat || resMat.rows<=0 || resMat.cols<=0){
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+      ctx.fillStyle='white';
+      ctx.fillText("Template demasiado grande",10,24);
       hideVideoOverlay();
-      requestAnimationFrame(processFrame);
-      return;
+      return requestAnimationFrame(processFrame);
     }
 
-    // matchTemplate + minMaxLoc
     cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
-    let minVal = {value:0}, maxVal = {value:0}, minLoc = {x:0,y:0}, maxLoc = {x:0,y:0};
-    cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
+    let minVal={value:0}, maxVal={value:0}, minLoc={x:0,y:0}, maxLoc={x:0,y:0};
+    cv.minMaxLoc(resMat, minVal,maxVal,minLoc,maxLoc);
     const best = maxVal.value;
 
-    // limpiar overlay canvas
-    ctx.clearRect(0,0,overlay.width, overlay.height);
-    ctx.fillStyle = 'white'; ctx.font = '16px Arial';
-    ctx.fillText('Match: ' + best.toFixed(3), 10, 20);
+    ctx.clearRect(0,0,overlay.width,overlay.height);
+    ctx.fillStyle='white';
+    ctx.fillText("Match: "+best.toFixed(3),10,20);
 
-    if (best >= MATCH_THRESHOLD) {
-      const scaleX = overlay.width / procCanvas.width;
-      const scaleY = overlay.height / procCanvas.height;
+    if (best >= MATCH_THRESHOLD){
+      const sX = overlay.width / pW;
+      const sY = overlay.height / pH;
 
       const matchX = maxLoc.x + templGray.cols/2;
       const matchY = maxLoc.y + templGray.rows/2;
 
-      // --- YA NO INVERTIMOS X: coordenadas normales ---
-      const drawX = (matchX * scaleX);
-      const drawY = (matchY * scaleY);
-      const drawW = templGray.cols * scaleX;
-      const drawH = templGray.rows * scaleY;
+      const drawX = matchX * sX;
+      const drawY = matchY * sY;
+      const drawW = templGray.cols * sX;
+      const drawH = templGray.rows * sY;
 
-      // dibuja rect (debug) en coordenadas normales
-      ctx.strokeStyle = 'rgba(255,120,200,0.9)';
-      ctx.lineWidth = 4;
-      ctx.strokeRect(maxLoc.x * scaleX, maxLoc.y * scaleY, drawW, drawH);
+      ctx.strokeStyle='rgba(255,120,200,0.9)';
+      ctx.lineWidth=4;
+      ctx.strokeRect(maxLoc.x*sX, maxLoc.y*sY, drawW, drawH);
 
-      // mostrar video overlay posicionado (o fallback)
       showVideoOverlay(drawX, drawY, drawW, drawH);
     } else {
       hideVideoOverlay();
     }
 
-  } catch(err) {
-    console.error('Error en procesamiento frame (guardado):', err);
-  } finally {
-    requestAnimationFrame(processFrame);
+  } catch(e){
+    console.error("Error procesando frame", e);
   }
+
+  requestAnimationFrame(processFrame);
 }
 
-/* ---------- Start button ---------- */
-startBtn.addEventListener('click', async () => {
-  startBtn.disabled = true;
-  startBtn.style.display = 'none';
-  log('Activando cámara...');
+/* ========================= */
+/*        BOTÓN START        */
+/* ========================= */
+startBtn.addEventListener('click', async ()=>{
+  startBtn.style.display='none';
+  log("Activando cámara...");
   await startCamera();
 });
 
-/* ---------- Limpieza ---------- */
-window.addEventListener('pagehide', () => {
-  try {
-    if (srcMat) { srcMat.delete(); srcMat = null; }
-    if (grayMat) { grayMat.delete(); grayMat = null; }
-    if (templMat) { templMat.delete(); templMat = null; }
-    if (templGray) { templGray.delete(); templGray = null; }
-    if (resMat) { resMat.delete(); resMat = null; }
-  } catch(e){}
+/* ========================= */
+/*        LIMPIEZA           */
+/* ========================= */
+window.addEventListener('pagehide', ()=>{
+  try{
+    if (srcMat) srcMat.delete();
+    if (grayMat) grayMat.delete();
+    if (templMat) templMat.delete();
+    if (templGray) templGray.delete();
+    if (resMat) resMat.delete();
+  }catch(e){}
   stopCamera();
 });
 </script>
