@@ -2,55 +2,25 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Debug</title>
+  <title>AR Camiseta - Debug init</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <script>
-(async function(){
-  const rawUrl = "https://raw.githubusercontent.com/xTorres97/Camisasqr/master/targets.mind";
-  try {
-    const resp = await fetch(rawUrl);
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const arr = await resp.arrayBuffer();
-    const blob = new Blob([arr], {type: 'application/octet-stream'});
-    const blobUrl = URL.createObjectURL(blob);
-    // Establece dinámicamente la ruta de imageTargetSrc para MindAR
-    const sceneEl = document.querySelector('a-scene');
-    // Si no existe aún la escena, espera un poco
-    if (!sceneEl) {
-      console.warn('a-scene no encontrado, intentando de nuevo en 200ms');
-      setTimeout(()=> {
-        const sc = document.querySelector('a-scene');
-        if (sc) sc.setAttribute('mindar-image', 'imageTargetSrc: ' + blobUrl + '; autoStart: false;');
-      }, 200);
-    } else {
-      sceneEl.setAttribute('mindar-image', 'imageTargetSrc: ' + blobUrl + '; autoStart: false;');
-    }
-    console.log('targets.mind cargado desde raw -> blob URL');
-  } catch (e) {
-    console.error('No se pudo cargar targets.mind desde raw:', e);
-    alert('Error cargando targets.mind: ' + e.message + '. Revisa que la URL raw exista o sube el archivo correctamente.');
-  }
-})();
-</script>
-
   <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.1.4/dist/mindar-image-aframe.prod.js"></script>
   <style>
     body, html { margin:0; padding:0; height:100%; overflow:hidden; background:#000; color:#fff; font-family:Arial, sans-serif; }
-    #startBtn { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); padding:12px 18px; font-size:16px; border-radius:8px; background:#ff4fa8; color:white; border:none; cursor:pointer; }
+    #startBtn { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); padding:12px 18px; font-size:16px; border-radius:8px; background:#ff4fa8; color:white; border:none; cursor:pointer; display:none; }
     #note { position:fixed; bottom:10px; left:10px; right:10px; text-align:center; font-size:14px; opacity:0.9; }
-    #err { position:fixed; top:8px; left:8px; padding:10px; background:rgba(255,0,0,0.12); color:#ffdddd; border-radius:6px; display:none; max-width:calc(100% - 24px); }
+    #log { position:fixed; top:8px; left:8px; padding:8px; background:rgba(0,0,0,0.6); color:#fff; border-radius:6px; max-width:40%; font-size:12px; }
   </style>
 </head>
 <body>
-  <div id="err"></div>
-  <button id="startBtn" disabled>Comprobar archivos...</button>
+  <div id="log">Inicializando...</div>
+  <button id="startBtn">Activar AR</button>
   <div id="note">Apunta la cámara hacia la imagen de la camiseta</div>
 
-  <!-- escena (no arrancamos hasta confirmar .mind) -->
+  <!-- a-scene: dejamos mindar-image vacío inicialmente; lo rellenamos dinámicamente -->
   <a-scene id="arScene"
-      mindar-image="imageTargetSrc: ./targets.mind; autoStart: false;"
-      embedded color-space="sRGB" vr-mode-ui="enabled: false">
+      embedded color-space="sRGB" vr-mode-ui="enabled: false"
+      renderer="colorManagement: true; physicallyCorrectLights: true;">
     <a-entity camera></a-entity>
     <a-entity mindar-image-target="targetIndex: 0">
       <a-entity id="animHeart" position="0 0 0">
@@ -68,56 +38,69 @@
   </a-scene>
 
   <script>
+    const LOG = (s) => { document.getElementById('log').textContent = s; console.log(s); };
     const startBtn = document.getElementById('startBtn');
-    const errBox = document.getElementById('err');
     const sceneEl = document.getElementById('arScene');
 
-    // Comprobación rápida de disponibilidad del archivo 'targets.mind'
-    async function checkMindFile() {
+    // raw URL del archivo targets.mind (usa tu ruta raw)
+    const rawUrl = "https://raw.githubusercontent.com/xTorres97/Camisasqr/master/targets.mind";
+
+    async function setupMindARFromRaw() {
       try {
-        const resp = await fetch('./targets.mind', { method: 'HEAD' });
-        if (!resp.ok) {
-          showError("No se pudo encontrar 'targets.mind' (HTTP " + resp.status + "). Asegúrate de que el archivo esté en la misma carpeta que index.html y que se llame exactamente targets.mind (minúsculas).");
-          startBtn.textContent = "Archivo .mind NO encontrado";
-          startBtn.disabled = true;
-          return false;
-        }
-        // OK
-        startBtn.textContent = "Activar AR";
+        LOG('Descargando targets.mind desde raw...');
+        const resp = await fetch(rawUrl);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status + ' al descargar targets.mind');
+        const arr = await resp.arrayBuffer();
+        LOG('targets.mind descargado: ' + arr.byteLength + ' bytes — creando blob...');
+        const blob = new Blob([arr], {type: 'application/octet-stream'});
+        const blobUrl = URL.createObjectURL(blob);
+
+        // Asignamos la URL blob como atributo a-scene para que MindAR la use
+        LOG('Asignando blobUrl a atributo mindar-image (esto debe hacerse antes de cargar la librería MindAR)...');
+        // nota: no usamos sceneEl.setAttribute('mindar-image', ...) todavía porque queremos construir la cadena completa
+        sceneEl.setAttribute('mindar-image', 'imageTargetSrc: ' + blobUrl + '; autoStart: false;');
+
+        // Ahora cargamos dinámicamente el script de MindAR (para que se inicialice con la carpeta ya configurada)
+        LOG('Cargando script mindar-image-aframe.prod.js dinámicamente...');
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = "https://cdn.jsdelivr.net/npm/mind-ar@1.1.4/dist/mindar-image-aframe.prod.js";
+          s.onload = () => { LOG('Script MindAR cargado. Ya puede iniciar AR.'); resolve(); };
+          s.onerror = (e) => { reject(new Error('No se pudo cargar la librería MindAR: ' + e)); };
+          document.head.appendChild(s);
+        });
+
+        // Habilitar botón de inicio
+        startBtn.style.display = 'inline-block';
         startBtn.disabled = false;
-        hideError();
-        return true;
+        LOG('Listo: pulsa "Activar AR" para iniciar la cámara.');
+
       } catch (e) {
-        showError("Error al comprobar 'targets.mind': " + e.message + ". Revisa la consola y la pestaña Network.");
-        startBtn.textContent = "Error comprobación";
-        startBtn.disabled = true;
+        LOG('ERROR: ' + (e && e.message ? e.message : e));
+        alert('Error cargando targets.mind: ' + (e && e.message ? e.message : e) + '. Revisa la consola.');
         console.error(e);
-        return false;
       }
     }
 
-    function showError(msg) {
-      errBox.style.display = 'block';
-      errBox.textContent = msg;
-    }
-    function hideError() {
-      errBox.style.display = 'none';
-    }
-
-    // Llamamos a la comprobación al cargar
-    checkMindFile();
+    // Arrancamos la preparación al cargar la página
+    setupMindARFromRaw();
 
     startBtn.addEventListener('click', async () => {
       try {
-        // revalidamos antes de iniciar
-        const ok = await checkMindFile();
-        if (!ok) return;
+        const mindarComp = sceneEl.components['mindar-image'];
+        if (!mindarComp) {
+          LOG('Componente mindar-image todavía no inicializado — espera 200ms e intenta de nuevo.');
+          await new Promise(r => setTimeout(r, 200));
+        }
         const mindar = sceneEl.components['mindar-image'];
+        if (!mindar) throw new Error('mindar-image no está disponible aún. Recarga la página.');
         await mindar.start();
         startBtn.style.display = 'none';
+        LOG('AR iniciado. Busca el marcador en la camiseta.');
       } catch (err) {
-        showError("Error al iniciar MindAR: " + (err && err.message ? err.message : err));
+        LOG('Error al iniciar AR: ' + (err && err.message ? err.message : err));
         console.error(err);
+        alert('Error al iniciar AR: ' + (err && err.message ? err.message : err));
       }
     });
   </script>
