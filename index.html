@@ -2,106 +2,95 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Demo</title>
+  <title>AR Camiseta - Debug</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  
-  <!-- A-Frame -->
   <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
-
-  <!-- MindAR -->
   <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.1.4/dist/mindar-image-aframe.prod.js"></script>
-
   <style>
-    body, html { margin:0; padding:0; height:100%; overflow:hidden; background:#000; }
-    #startBtn {
-      position:fixed;
-      left:50%; top:50%;
-      transform:translate(-50%,-50%);
-      padding:14px 20px;
-      font-size:18px;
-      border-radius:10px;
-      background:#ff4fa8;
-      color:white;
-      border:none;
-      cursor:pointer;
-      box-shadow:0 4px 12px rgba(255,0,100,0.4);
-    }
-    #note {
-      position:fixed;
-      bottom:10px;
-      left:0; right:0;
-      text-align:center;
-      font-family:Arial, sans-serif;
-      color:white;
-      opacity:0.8;
-      font-size:14px;
-    }
+    body, html { margin:0; padding:0; height:100%; overflow:hidden; background:#000; color:#fff; font-family:Arial, sans-serif; }
+    #startBtn { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); padding:12px 18px; font-size:16px; border-radius:8px; background:#ff4fa8; color:white; border:none; cursor:pointer; }
+    #note { position:fixed; bottom:10px; left:10px; right:10px; text-align:center; font-size:14px; opacity:0.9; }
+    #err { position:fixed; top:8px; left:8px; padding:10px; background:rgba(255,0,0,0.12); color:#ffdddd; border-radius:6px; display:none; max-width:calc(100% - 24px); }
   </style>
 </head>
-
 <body>
-  <!-- Botón para iniciar la cámara -->
-  <button id="startBtn">Activar AR</button>
+  <div id="err"></div>
+  <button id="startBtn" disabled>Comprobar archivos...</button>
   <div id="note">Apunta la cámara hacia la imagen de la camiseta</div>
 
-  <!-- Escena AR -->
-  <a-scene
+  <!-- escena (no arrancamos hasta confirmar .mind) -->
+  <a-scene id="arScene"
       mindar-image="imageTargetSrc: ./targets.mind; autoStart: false;"
-      embedded
-      color-space="sRGB"
-      vr-mode-ui="enabled: false"
-      renderer="colorManagement: true; physicallyCorrectLights: true;">
-
+      embedded color-space="sRGB" vr-mode-ui="enabled: false">
     <a-entity camera></a-entity>
-
-    <!-- TARGET DETECTADO -->
     <a-entity mindar-image-target="targetIndex: 0">
-
-      <!-- 🔥 ANIMACIÓN EN BUCLE 🔥 -->
       <a-entity id="animHeart" position="0 0 0">
-
-        <!-- Esfera-luz que late y se desvanece -->
-        <a-sphere 
-          radius="0.01"
-          color="#ff7ac8"
-          opacity="0.85"
-
+        <a-sphere radius="0.01" color="#ff7ac8" opacity="0.85"
           animation__appear="property: scale; from: 0 0 0; to: 0.15 0.15 0.15; dur: 800; easing: easeOutQuad; loop: true; dir: alternate"
           animation__pulse="property: opacity; from: 0.5; to: 1; dur: 1000; loop: true; dir: alternate"
           animation__spin="property: rotation; to: 0 360 0; dur: 5000; loop: true">
         </a-sphere>
-
-        <!-- Aro mágico expandiéndose en bucle -->
-        <a-ring
-          radius-inner="0.02"
-          radius-outer="0.022"
-          color="#ff9bd5"
-          opacity="0.7"
-          rotation="-90 0 0"
-          
+        <a-ring radius-inner="0.02" radius-outer="0.022" color="#ff9bd5" opacity="0.7" rotation="-90 0 0"
           animation__grow="property: scale; from: 0.1 0.1 0.1; to: 2 2 2; dur: 2000; loop: true"
           animation__fade="property: opacity; from: 0.8; to: 0; dur: 2000; loop: true">
         </a-ring>
-
       </a-entity>
     </a-entity>
-
   </a-scene>
+
   <script>
     const startBtn = document.getElementById('startBtn');
-    const sceneEl = document.querySelector('a-scene');
+    const errBox = document.getElementById('err');
+    const sceneEl = document.getElementById('arScene');
+
+    // Comprobación rápida de disponibilidad del archivo 'targets.mind'
+    async function checkMindFile() {
+      try {
+        const resp = await fetch('./targets.mind', { method: 'HEAD' });
+        if (!resp.ok) {
+          showError("No se pudo encontrar 'targets.mind' (HTTP " + resp.status + "). Asegúrate de que el archivo esté en la misma carpeta que index.html y que se llame exactamente targets.mind (minúsculas).");
+          startBtn.textContent = "Archivo .mind NO encontrado";
+          startBtn.disabled = true;
+          return false;
+        }
+        // OK
+        startBtn.textContent = "Activar AR";
+        startBtn.disabled = false;
+        hideError();
+        return true;
+      } catch (e) {
+        showError("Error al comprobar 'targets.mind': " + e.message + ". Revisa la consola y la pestaña Network.");
+        startBtn.textContent = "Error comprobación";
+        startBtn.disabled = true;
+        console.error(e);
+        return false;
+      }
+    }
+
+    function showError(msg) {
+      errBox.style.display = 'block';
+      errBox.textContent = msg;
+    }
+    function hideError() {
+      errBox.style.display = 'none';
+    }
+
+    // Llamamos a la comprobación al cargar
+    checkMindFile();
 
     startBtn.addEventListener('click', async () => {
       try {
+        // revalidamos antes de iniciar
+        const ok = await checkMindFile();
+        if (!ok) return;
         const mindar = sceneEl.components['mindar-image'];
         await mindar.start();
         startBtn.style.display = 'none';
       } catch (err) {
-        alert("Error al activar cámara. Permite acceso o usa un navegador actualizado.");
+        showError("Error al iniciar MindAR: " + (err && err.message ? err.message : err));
         console.error(err);
       }
     });
   </script>
-
 </body>
 </html>
