@@ -2,43 +2,51 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - OpenCV Template Matching (Optimizado)</title>
+  <title>AR Camiseta - Video Overlay</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
     #videoWrapper{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
     video#cam{width:100%;height:100%;object-fit:cover;transform:scaleX(-1);} /* espejo para UX */
-    canvas#overlay{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none}
-    #startBtn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 18px;background:#ff4fa8;border-radius:10px;border:none;color:#fff;font-size:18px;z-index:30}
-    #note{position:fixed;left:0;right:0;bottom:10px;text-align:center;z-index:30;opacity:0.9}
-    #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:30}
+    canvas#overlay{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none; z-index:20}
+    #fxVideo{position:fixed; left:0; top:0; transform-origin:center center; display:none; pointer-events:none; z-index:30;}
+    #startBtn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 18px;background:#ff4fa8;border-radius:10px;border:none;color:#fff;font-size:18px;z-index:40}
+    #note{position:fixed;left:0;right:0;bottom:10px;text-align:center;z-index:40;opacity:0.9}
+    #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:40}
   </style>
 </head>
 <body>
   <div id="videoWrapper">
-    <video id="cam" autoplay playsinline></video>
+    <video id="cam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
   </div>
+
+  <!-- Video de efecto (tu archivo). Debes subir animacion.webm a la misma carpeta -->
+  <video id="fxVideo" autoplay loop muted playsinline preload="auto" style="will-change:transform;">
+    <source src="./animacion.webm" type="video/webm">
+    <!-- Si quieres añadir mp4 fallback, añádelo aquí (sin alpha) -->
+  </video>
 
   <button id="startBtn">Activar AR</button>
   <div id="note">Apunta la cámara hacia la imagen de la camiseta</div>
   <div id="log">listo</div>
 
-  <!-- OpenCV.js (CDN) -->
+  <!-- OpenCV.js -->
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV cargado')"></script>
 
 <script>
-/* ---------------- CONFIG ---------------- */
-const TARGET_URL = './target.png';   // Debe existir en la misma carpeta
-let MATCH_THRESHOLD = 0.7;         // Ajusta entre 0.55 - 0.80 según pruebas
-const RES_SCALE = 0.5;              // Procesar a 50% para mejor rendimiento
-/* ---------------------------------------- */
+/* ========== CONFIG ========== */
+const TARGET_URL = './target.png';   // debe existir en la misma carpeta
+let MATCH_THRESHOLD = 0.65;          // ajusta (0.55..0.80)
+let RES_SCALE = 0.6;                 // 0.5-0.8; aumenta si templ > proc area
+/* ============================ */
 
 const cam = document.getElementById('cam');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
 const startBtn = document.getElementById('startBtn');
 const logEl = document.getElementById('log');
+const fxVideo = document.getElementById('fxVideo');
 
 let videoStream = null;
 let streaming = false;
@@ -50,13 +58,12 @@ let animStart = null;
 
 function log(s){ logEl.textContent = s; console.log(s); }
 
-/* ---------- Animación corazón (canvas) ---------- */
+/* ---------- Animación fallback (canvas heart) ---------- */
 function drawHeart(x, y, w, h, t){
-  // x,y in canvas coords (center)
+  // center x,y (px), w,h (px)
   const maxR = Math.min(w,h) * 0.5;
   const pulse = 0.85 + 0.25 * Math.sin(t/200);
   const r = maxR * pulse;
-
   // glow
   ctx.save();
   const grad = ctx.createRadialGradient(x, y, r*0.1, x, y, r*1.3);
@@ -68,7 +75,6 @@ function drawHeart(x, y, w, h, t){
   ctx.arc(x, y, r*1.4, 0, Math.PI*2);
   ctx.fill();
 
-  // heart path scaled
   ctx.translate(x, y);
   ctx.scale(r/50, r/50);
   ctx.beginPath();
@@ -81,6 +87,33 @@ function drawHeart(x, y, w, h, t){
   ctx.fillStyle = 'rgba(255,120,200,0.95)';
   ctx.fill();
   ctx.restore();
+}
+
+/* ---------- Video overlay control ---------- */
+function showVideoOverlay(cx, cy, w, h){
+  if (!fxVideo) return;
+  // cx,cy center in overlay canvas coords
+  const left = cx - w/2;
+  const top = cy - h/2;
+  // overlay bounding box on screen (in px)
+  const rect = overlay.getBoundingClientRect();
+  // set video style absolute on screen
+  fxVideo.style.display = 'block';
+  fxVideo.style.width = Math.max(10, w) + 'px';
+  fxVideo.style.height = Math.max(10, h) + 'px';
+  fxVideo.style.left = (rect.left + left) + 'px';
+  fxVideo.style.top = (rect.top + top) + 'px';
+  fxVideo.style.objectFit = 'contain';
+  // start playing if paused
+  if (fxVideo.paused) {
+    fxVideo.play().catch(()=>{ /* autoplay policy fallback */});
+  }
+}
+
+function hideVideoOverlay(){
+  if (!fxVideo) return;
+  fxVideo.pause();
+  fxVideo.style.display = 'none';
 }
 
 /* ---------- Cámara ---------- */
@@ -112,7 +145,7 @@ function resizeCanvas(){
   overlay.style.height = cam.clientHeight + 'px';
 }
 
-/* ---------- Preparar OpenCV y template ---------- */
+/* ---------- Preparar OpenCV y template (robusto) ---------- */
 async function prepareOpenCV(){
   log('Esperando OpenCV...');
   if (typeof cv === 'undefined' || !cv.imread){
@@ -150,10 +183,9 @@ async function prepareOpenCV(){
     procCanvas = document.createElement('canvas');
     procCanvas.width = procCanvasW;
     procCanvas.height = procCanvasH;
-    // willReadFrequently para acelerar getImageData en algunos navegadores
     procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
 
-    // Mats reducidos (crearlos una vez)
+    // inicializar mats reducidos
     if (srcMat) { srcMat.delete(); srcMat = null; }
     if (grayMat) { grayMat.delete(); grayMat = null; }
     if (resMat) { resMat.delete(); resMat = null; }
@@ -161,7 +193,6 @@ async function prepareOpenCV(){
     srcMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC4);
     grayMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC1);
 
-    // crear resMat si cabe
     const resW = procCanvasW - templGray.cols + 1;
     const resH = procCanvasH - templGray.rows + 1;
     if (resW > 0 && resH > 0) {
@@ -181,20 +212,19 @@ async function prepareOpenCV(){
   };
 }
 
-/* ---------- Procesamiento por frame (optimizado) ---------- */
+/* ---------- Procesamiento por frame (seguro) ---------- */
 function processFrame(now){
   if (!streaming) return;
   try {
-    // Si el tamaño del video cambió, reajustar canvas y mats
+    // reajustar si el video cambió resolución
     const neededW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
     const neededH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
     if (!procCanvas || procCanvas.width !== neededW || procCanvas.height !== neededH) {
-      // liberar mats viejos
+      // liberar y recrear mats
       if (srcMat) { srcMat.delete(); srcMat = null; }
       if (grayMat) { grayMat.delete(); grayMat = null; }
       if (resMat) { resMat.delete(); resMat = null; }
 
-      // recrear procCanvas y mats
       procCanvas = document.createElement('canvas');
       procCanvas.width = neededW;
       procCanvas.height = neededH;
@@ -210,41 +240,40 @@ function processFrame(now){
       } else {
         resMat = null;
       }
-      log('Reinicializado procesador: ' + neededW + 'x' + neededH + ' (resMat ' + (resMat ? 'ok' : 'INVALID') + ')');
+      log('Reiniciado procesador: ' + neededW + 'x' + neededH + ' (resMat ' + (resMat ? 'ok' : 'INVALID') + ')');
     }
 
-    // Dibujar video reducido en procCanvas
+    // dibujar video reducido
     procCtx.drawImage(cam, 0, 0, procCanvas.width, procCanvas.height);
 
-    // actualizar srcMat sin crear nuevos objetos (más eficiente)
+    // actualizar srcMat (eficiente)
     const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
     if (srcMat && srcMat.data && srcMat.data.length === imageData.data.length) {
       srcMat.data.set(imageData.data);
     } else {
-      // fallback seguro
       srcMat = cv.imread(procCanvas);
     }
 
     // convertir a gris
     cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
 
-    // solo ejecutar matchTemplate si resMat es válido
+    // si resMat inválida, no ejecutar matchTemplate
     if (!resMat || resMat.rows <= 0 || resMat.cols <= 0) {
-      // no podemos calcular: template demasiado grande o resMat inválida
       ctx.clearRect(0,0,overlay.width, overlay.height);
       ctx.fillStyle = 'white'; ctx.font = '14px Arial';
       ctx.fillText('Template too large for processing area. Increase RES_SCALE or use a smaller template.', 10, 24);
+      hideVideoOverlay();
       requestAnimationFrame(processFrame);
       return;
     }
 
-    // matchTemplate y minMaxLoc (seguro ahora)
+    // matchTemplate + minMaxLoc
     cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
     let minVal = {value:0}, maxVal = {value:0}, minLoc = {x:0,y:0}, maxLoc = {x:0,y:0};
     cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
     const best = maxVal.value;
 
-    // limpiar overlay y dibujar info
+    // limpiar overlay canvas
     ctx.clearRect(0,0,overlay.width, overlay.height);
     ctx.fillStyle = 'white'; ctx.font = '16px Arial';
     ctx.fillText('Match: ' + best.toFixed(3), 10, 20);
@@ -261,12 +290,18 @@ function processFrame(now){
       const drawW = templGray.cols * scaleX;
       const drawH = templGray.rows * scaleY;
 
+      // dibuja rect (debug)
       ctx.strokeStyle = 'rgba(255,120,200,0.9)';
       ctx.lineWidth = 4;
       ctx.strokeRect(overlay.width - ((maxLoc.x + templGray.cols) * scaleX), maxLoc.y * scaleY, drawW, drawH);
 
-      const elapsed = now - animStart;
-      drawHeart(drawX, drawY, drawW, drawH, elapsed);
+      // mostrar video overlay posicionado (o fallback)
+      // fxVideo espera coordenadas en canvas (center)
+      showVideoOverlay(drawX, drawY, drawW, drawH);
+    } else {
+      hideVideoOverlay();
+      // opcional fallback: dibujar corazón si quieres cuando no haya video
+      // drawHeart(overlay.width/2, overlay.height/2, 200, 200, now - animStart);
     }
 
   } catch(err) {
@@ -275,7 +310,8 @@ function processFrame(now){
     requestAnimationFrame(processFrame);
   }
 }
-/* ---------- Evento del botón ---------- */
+
+/* ---------- Start button ---------- */
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   startBtn.style.display = 'none';
@@ -283,7 +319,7 @@ startBtn.addEventListener('click', async () => {
   await startCamera();
 });
 
-/* ---------- Limpieza al cerrar ---------- */
+/* ---------- Limpieza ---------- */
 window.addEventListener('pagehide', () => {
   try {
     if (srcMat) { srcMat.delete(); srcMat = null; }
@@ -294,14 +330,6 @@ window.addEventListener('pagehide', () => {
   } catch(e){}
   stopCamera();
 });
-
-/* ---------- Tips rápidos ---------- */
-/*
- - Si la detección es muy estricta, baja MATCH_THRESHOLD a 0.60 o 0.55.
- - Si la detección es muy lenta, reduce RES_SCALE (por ejemplo 0.4) o recorta target.png para que sea más pequeño.
- - Si necesitas tolerancia a rotación/escala muy grande, considera la versión ORB/feature-matching (yo puedo implementarla).
-*/
-
 </script>
 </body>
 </html>
