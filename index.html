@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - OpenCV Template Matching</title>
+  <title>AR Camiseta - OpenCV Template Matching (Optimizado)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -11,7 +11,7 @@
     canvas#overlay{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none}
     #startBtn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 18px;background:#ff4fa8;border-radius:10px;border:none;color:#fff;font-size:18px;z-index:30}
     #note{position:fixed;left:0;right:0;bottom:10px;text-align:center;z-index:30;opacity:0.9}
-    #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.5);padding:6px 8px;border-radius:6px;font-size:12px;z-index:30}
+    #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:30}
   </style>
 </head>
 <body>
@@ -27,96 +27,97 @@
   <!-- OpenCV.js (CDN) -->
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV cargado')"></script>
 
-  <script>
-  // CONFIG
-  const TARGET_URL = './target.png'; // ya debe estar en la misma carpeta
-  const MATCH_THRESHOLD = 0.70;      // ajuste: cuanto más alto, más estricto
+<script>
+/* ---------------- CONFIG ---------------- */
+const TARGET_URL = './target.png';   // Debe existir en la misma carpeta
+let MATCH_THRESHOLD = 0.70;         // Ajusta entre 0.55 - 0.80 según pruebas
+const RES_SCALE = 0.5;              // Procesar a 50% para mejor rendimiento
+/* ---------------------------------------- */
 
-  // ELEMENTOS
-  const cam = document.getElementById('cam');
-  const overlay = document.getElementById('overlay');
-  const ctx = overlay.getContext('2d');
-  const startBtn = document.getElementById('startBtn');
-  const logEl = document.getElementById('log');
+const cam = document.getElementById('cam');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const logEl = document.getElementById('log');
 
-  let videoStream = null;
-  let streaming = false;
-  let srcMat = null, grayMat = null, templMat = null, templGray = null, resMat = null;
+let videoStream = null;
+let streaming = false;
 
-  // ANIMACIÓN: parámetros
-  let animStart = null;
-  const ANIM_PERIOD = 5000; // 5s loop
-  function drawHeart(x, y, w, h, t){
-    // x,y in canvas coords = center of matched box
-    // draw a glowing pulsing heart using canvas
-    const maxR = Math.min(w,h) * 0.6;
-    const pulse = 0.75 + 0.25 * Math.sin(t/200);
-    const r = maxR * pulse;
-    // glow
-    ctx.save();
-    const grad = ctx.createRadialGradient(x, y, r*0.1, x, y, r*1.2);
-    grad.addColorStop(0, 'rgba(255,122,200,0.95)');
-    grad.addColorStop(0.5, 'rgba(255,122,200,0.45)');
-    grad.addColorStop(1, 'rgba(255,122,200,0.0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(x, y, r*1.4, 0, Math.PI*2);
-    ctx.fill();
+// OpenCV mats
+let srcMat = null, grayMat = null, templMat = null, templGray = null, resMat = null;
+let procCanvas = null, procCtx = null;
+let animStart = null;
 
-    // simple heart shape (path)
-    ctx.translate(x, y);
-    ctx.scale(r/50, r/50);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.bezierCurveTo(0, -25, -50, -25, -50, 0);
-    ctx.bezierCurveTo(-50, 30, -20, 55, 0, 75);
-    ctx.bezierCurveTo(20, 55, 50, 30, 50, 0);
-    ctx.bezierCurveTo(50, -25, 0, -25, 0, 0);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(255,120,200,0.95)';
-    ctx.fill();
-    ctx.restore();
+function log(s){ logEl.textContent = s; console.log(s); }
+
+/* ---------- Animación corazón (canvas) ---------- */
+function drawHeart(x, y, w, h, t){
+  // x,y in canvas coords (center)
+  const maxR = Math.min(w,h) * 0.5;
+  const pulse = 0.85 + 0.25 * Math.sin(t/200);
+  const r = maxR * pulse;
+
+  // glow
+  ctx.save();
+  const grad = ctx.createRadialGradient(x, y, r*0.1, x, y, r*1.3);
+  grad.addColorStop(0, 'rgba(255,122,200,0.95)');
+  grad.addColorStop(0.5, 'rgba(255,122,200,0.45)');
+  grad.addColorStop(1, 'rgba(255,122,200,0.0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(x, y, r*1.4, 0, Math.PI*2);
+  ctx.fill();
+
+  // heart path scaled
+  ctx.translate(x, y);
+  ctx.scale(r/50, r/50);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(0, -25, -50, -25, -50, 0);
+  ctx.bezierCurveTo(-50, 30, -20, 55, 0, 75);
+  ctx.bezierCurveTo(20, 55, 50, 30, 50, 0);
+  ctx.bezierCurveTo(50, -25, 0, -25, 0, 0);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255,120,200,0.95)';
+  ctx.fill();
+  ctx.restore();
+}
+
+/* ---------- Cámara ---------- */
+async function startCamera(){
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+    cam.srcObject = videoStream;
+    await cam.play();
+    streaming = true;
+    resizeCanvas();
+    prepareOpenCV();
+  } catch(e){
+    alert('Error al abrir la cámara: ' + e.message);
+    console.error(e);
   }
+}
 
-  function log(s){ logEl.textContent = s; }
-
-  // Inicia video
-  async function startCamera(){
-    try {
-      videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
-      cam.srcObject = videoStream;
-      await cam.play();
-      streaming = true;
-      resizeCanvas();
-      prepareOpenCV();
-    } catch(e){
-      alert('Error al abrir la cámara: ' + e.message);
-      console.error(e);
-    }
+function stopCamera(){
+  if (videoStream) {
+    videoStream.getTracks().forEach(t => t.stop());
+    streaming = false;
   }
+}
 
-  function stopCamera(){
-    if (videoStream) {
-      videoStream.getTracks().forEach(t => t.stop());
-      streaming = false;
-    }
-  }
+function resizeCanvas(){
+  overlay.width = cam.videoWidth;
+  overlay.height = cam.videoHeight;
+  overlay.style.width = cam.clientWidth + 'px';
+  overlay.style.height = cam.clientHeight + 'px';
+}
 
-  function resizeCanvas(){
-    overlay.width = cam.videoWidth;
-    overlay.height = cam.videoHeight;
-    overlay.style.width = cam.clientWidth + 'px';
-    overlay.style.height = cam.clientHeight + 'px';
-  }
-
-  // PREPARAR OpenCV: cargar template image
-  // --- REEMPLAZAR prepareOpenCV() y processFrame(now) por estas versiones ---
-
+/* ---------- Preparar OpenCV y template ---------- */
 async function prepareOpenCV(){
-  // Esperar a que OpenCV esté listo (igual que antes)
-  log('esperando OpenCV...');
-  if (typeof cv === 'undefined' || !cv.imread) {
-    let waited=0;
+  log('Esperando OpenCV...');
+  // esperar a que OpenCV esté cargado
+  if (typeof cv === 'undefined' || !cv.imread){
+    let waited = 0;
     while((typeof cv === 'undefined' || !cv.imread) && waited < 5000){
       await new Promise(r=>setTimeout(r,100));
       waited += 100;
@@ -126,51 +127,69 @@ async function prepareOpenCV(){
     alert('OpenCV no se cargó. Recarga la página.');
     return;
   }
-  log('OpenCV listo — cargando template...');
 
+  log('OpenCV listo — cargando template...');
   const img = new Image();
   img.crossOrigin = "anonymous";
-  img.src = TARGET_URL + '?v=' + Date.now();
+  img.src = TARGET_URL + '?v=' + Date.now(); // cache-busting
   img.onload = () => {
-    // plantamos el template en un canvas y lo convertimos a gray once
+    // crear canvas temporal para leer template
     const tmp = document.createElement('canvas');
     tmp.width = img.width; tmp.height = img.height;
     const tctx = tmp.getContext('2d');
-    tctx.drawImage(img,0,0);
+    tctx.drawImage(img, 0, 0);
     templMat = cv.imread(tmp);
     templGray = new cv.Mat();
     cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
 
-    // Decide scale para acelerar: procesaremos todo a RES_SCALE de la resol real del video
-    // 0.5 = mitad de resolución en cada eje (rapidez vs precisión)
-    window.RES_SCALE = 0.5;
-
-    // Inicializamos mats ONCE con tamaño reducido
+    // Preparar mats reducidos según RES_SCALE
     const procW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
     const procH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
 
-    // mats sobre los frames reducidos
-    srcMat = new cv.Mat(procH, procW, cv.CV_8UC4);
-    grayMat = new cv.Mat(procH, procW, cv.CV_8UC1);
+    // Si el template es más grande que el canvas reducido, adapta: reducimos templGray por SCALE_TEMPL si necesario
+    if (templGray.cols > procW || templGray.rows > procH) {
+      // Reescalar templMat a tamaño proporcional menor
+      const scaleFactor = Math.min(procW / templGray.cols, procH / templGray.rows);
+      const tmp2 = document.createElement('canvas');
+      tmp2.width = Math.floor(templMat.cols * scaleFactor);
+      tmp2.height = Math.floor(templMat.rows * scaleFactor);
+      const tctx2 = tmp2.getContext('2d');
+      // dibujar templMat en tmp2
+      const imgData = document.createElement('canvas');
+      imgData.width = templMat.cols; imgData.height = templMat.rows;
+      cv.imshow(imgData, templMat);
+      tctx2.drawImage(imgData, 0, 0, tmp2.width, tmp2.height);
+      // reemplazar templMat/templGray
+      templMat.delete();
+      templGray.delete();
+      templMat = cv.imread(tmp2);
+      templGray = new cv.Mat();
+      cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
+      log('Template reescalado para ajustarse al área de procesamiento.');
+    }
 
-    // resultado mat tamaño = W - w + 1 ...
-    const resW = procW - templGray.cols + 1;
-    const resH = procH - templGray.rows + 1;
-    // si template es más grande que proc, reduce templ o reduce RES_SCALE
+    // Inicializar mats (una vez) con tamaño reducido
+    const procCanvasW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
+    const procCanvasH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+    procCanvas = document.createElement('canvas');
+    procCanvas.width = procCanvasW;
+    procCanvas.height = procCanvasH;
+    procCtx = procCanvas.getContext('2d');
+
+    srcMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC4);
+    grayMat = new cv.Mat(procCanvasH, procCanvasW, cv.CV_8UC1);
+
+    const resW = procCanvasW - templGray.cols + 1;
+    const resH = procCanvasH - templGray.rows + 1;
     if (resW <= 0 || resH <= 0) {
-      alert('El template es más grande que el área de procesamiento. Reduce la resolución del template o cambia RES_SCALE a un valor mayor (p.ej. 0.8).');
+      alert('El template es más grande que la zona de procesamiento. Reduce el tamaño del template o aumenta RES_SCALE.');
       return;
     }
     resMat = new cv.Mat(resH, resW, cv.CV_32FC1);
 
-    // creamos un canvas de trabajo (reducción) para dibujar el video en baja resolución
-    window.procCanvas = document.createElement('canvas');
-    procCanvas.width = procW; procCanvas.height = procH;
-    window.procCtx = procCanvas.getContext('2d');
-
     animStart = performance.now();
     requestAnimationFrame(processFrame);
-    log('Template cargado: ' + img.width + 'x' + img.height + ' — procesando a ' + procW + 'x' + procH);
+    log('Template cargado: ' + templMat.cols + 'x' + templMat.rows + ' — procesando a ' + procCanvasW + 'x' + procCanvasH);
   };
   img.onerror = (e) => {
     alert('No se pudo cargar target.png desde: ' + TARGET_URL);
@@ -178,33 +197,34 @@ async function prepareOpenCV(){
   };
 }
 
-
+/* ---------- Procesamiento por frame (optimizado) ---------- */
 function processFrame(now){
   if (!streaming) return;
   try {
-    // Pintar el video escalado en procCanvas
+    // dibujar video reducido en procCanvas
     procCtx.drawImage(cam, 0, 0, procCanvas.width, procCanvas.height);
 
-    // Leer imageData y actualizar srcMat de forma eficiente
+    // actualizar srcMat eficientemente
     const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
-    srcMat.data.set(imageData.data); // evita crear un nuevo Mat cada frame
+    srcMat.data.set(imageData.data);
 
-    // convertir a gris
+    // convertir a gris (en el mismo tamaño reducido)
     cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
 
-    // matchTemplate (rápido al estar reducido)
+    // matchTemplate
     cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
+
     let minVal = {value:0}, maxVal = {value:0}, minLoc = {x:0,y:0}, maxLoc = {x:0,y:0};
     cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
     const best = maxVal.value;
 
-    // Limpiar overlay y dibujar debug
+    // limpiar overlay
     ctx.clearRect(0,0,overlay.width, overlay.height);
     ctx.fillStyle = 'white'; ctx.font = '16px Arial';
     ctx.fillText('Match: ' + best.toFixed(3), 10, 20);
 
     if (best >= MATCH_THRESHOLD) {
-      // coordenadas en procCanvas -> escalar a overlay (pantalla)
+      // calcular coordenadas escaladas al overlay (pantalla)
       const scaleX = overlay.width / procCanvas.width;
       const scaleY = overlay.height / procCanvas.height;
 
@@ -216,110 +236,50 @@ function processFrame(now){
       const drawW = templGray.cols * scaleX;
       const drawH = templGray.rows * scaleY;
 
-      // rectángulo de detección
+      // dibujar rectángulo de detección
       ctx.strokeStyle = 'rgba(255,120,200,0.9)';
       ctx.lineWidth = 4;
       ctx.strokeRect(overlay.width - ((maxLoc.x + templGray.cols) * scaleX), maxLoc.y * scaleY, drawW, drawH);
 
-      // dibujar corazón con las dimensiones escaladas
+      // dibujar animación corazón (centro)
       const elapsed = now - animStart;
       drawHeart(drawX, drawY, drawW, drawH, elapsed);
     }
-    // No borres srcMat ni grayMat aquí (se reutilizan)
 
   } catch(err) {
-    console.error('Error en procesamiento frame (opt):', err);
+    console.error('Error en procesamiento frame:', err);
   } finally {
     requestAnimationFrame(processFrame);
   }
 }
-  // procesamiento por frame: matchTemplate
-  function processFrame(now){
-    if (!streaming) return;
-    try {
-      // asegurar que tamaños de mats concuerden (si la cam cambió resolución)
-      if (srcMat.cols !== cam.videoWidth || srcMat.rows !== cam.videoHeight) {
-        // liberar y recrear mats con nuevo tamaño
-        if (srcMat) srcMat.delete();
-        if (grayMat) grayMat.delete();
-        if (resMat) resMat.delete();
-        srcMat = new cv.Mat(cam.videoHeight, cam.videoWidth, cv.CV_8UC4);
-        grayMat = new cv.Mat(cam.videoHeight, cam.videoWidth, cv.CV_8UC1);
-        resMat = new cv.Mat(cam.videoHeight - templGray.rows + 1, cam.videoWidth - templGray.cols + 1, cv.CV_32FC1);
-      }
 
-      // leer frame de video
-      ctx.clearRect(0,0,overlay.width, overlay.height);
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = cam.videoWidth; tempCanvas.height = cam.videoHeight;
-      const tctx = tempCanvas.getContext('2d');
-      tctx.drawImage(cam, 0, 0, tempCanvas.width, tempCanvas.height);
+/* ---------- Evento del botón ---------- */
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startBtn.style.display = 'none';
+  log('Activando cámara...');
+  await startCamera();
+});
 
-      // convertir a mat y grayscale
-      srcMat = cv.imread(tempCanvas);
-      cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+/* ---------- Limpieza al cerrar ---------- */
+window.addEventListener('pagehide', () => {
+  try {
+    if (srcMat) { srcMat.delete(); srcMat = null; }
+    if (grayMat) { grayMat.delete(); grayMat = null; }
+    if (templMat) { templMat.delete(); templMat = null; }
+    if (templGray) { templGray.delete(); templGray = null; }
+    if (resMat) { resMat.delete(); resMat = null; }
+  } catch(e){}
+  stopCamera();
+});
 
-      // matchTemplate
-      cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
-      // localizar el mejor match
-      let minVal = {value:0}, maxVal = {value:0}, minLoc = {x:0,y:0}, maxLoc = {x:0,y:0};
-      cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
-      const best = maxVal.value;
-      // opcional: dibujar debug
-      // ctx.fillStyle = 'white'; ctx.fillText('best: ' + best.toFixed(3), 10, 20);
+/* ---------- Tips rápidos ---------- */
+/*
+ - Si la detección es muy estricta, baja MATCH_THRESHOLD a 0.60 o 0.55.
+ - Si la detección es muy lenta, reduce RES_SCALE (por ejemplo 0.4) o recorta target.png para que sea más pequeño.
+ - Si necesitas tolerancia a rotación/escala muy grande, considera la versión ORB/feature-matching (yo puedo implementarla).
+*/
 
-      if (best >= MATCH_THRESHOLD) {
-        // calc center of matched region
-        const matchX = maxLoc.x + templGray.cols/2;
-        const matchY = maxLoc.y + templGray.rows/2;
-        // dibujar rectángulo de match (opcional)
-        ctx.strokeStyle = 'rgba(255,120,200,0.9)';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(maxLoc.x, maxLoc.y, templGray.cols, templGray.rows);
-
-        // dibujar animación corazón en el centro
-        const elapsed = now - animStart;
-        // adaptar coordenadas si video está espejo por CSS (video está mirrored)
-        // cam video está flip-x via CSS; invertimos X para overlay correcto
-        const canvasW = overlay.width, canvasH = overlay.height;
-        const drawX = canvasW - (matchX);
-        const drawY = matchY;
-        drawHeart(drawX, drawY, templGray.cols, templGray.rows, elapsed);
-      }
-      // liberar tempCanvas mat
-      srcMat.delete(); // creamos uno nuevo cada frame para evitar leaks (cuidado con rendimiento)
-    } catch(err) {
-      console.error('Error en procesamiento frame:', err);
-    } finally {
-      requestAnimationFrame(processFrame);
-    }
-  }
-
-  // Start button
-  startBtn.addEventListener('click', async () => {
-    startBtn.disabled = true;
-    startBtn.style.display = 'none';
-    log('Activando cámara...');
-    await startCamera();
-  });
-
-  // Si la página redimensiona, ajustar canvas
-  window.addEventListener('resize', () => {
-    if (streaming) resizeCanvas();
-  });
-
-  // antes de cerrar, liberar mats
-  window.addEventListener('pagehide', () => {
-    try {
-      if (srcMat) srcMat.delete();
-      if (grayMat) grayMat.delete();
-      if (templMat) templMat.delete();
-      if (templGray) templGray.delete();
-      if (resMat) resMat.delete();
-    } catch(e){}
-    stopCamera();
-  });
-
-  </script>
+</script>
 </body>
 </html>
