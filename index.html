@@ -110,50 +110,129 @@
   }
 
   // PREPARAR OpenCV: cargar template image
-  async function prepareOpenCV(){
-    // Esperar a que OpenCV esté listo
-    log('esperando OpenCV...');
-    if (typeof cv === 'undefined' || !cv.imread) {
-      // poll hasta que cargue
-      let waited=0;
-      while((typeof cv === 'undefined' || !cv.imread) && waited < 5000){
-        await new Promise(r=>setTimeout(r,100));
-        waited += 100;
-      }
+  // --- REEMPLAZAR prepareOpenCV() y processFrame(now) por estas versiones ---
+
+async function prepareOpenCV(){
+  // Esperar a que OpenCV esté listo (igual que antes)
+  log('esperando OpenCV...');
+  if (typeof cv === 'undefined' || !cv.imread) {
+    let waited=0;
+    while((typeof cv === 'undefined' || !cv.imread) && waited < 5000){
+      await new Promise(r=>setTimeout(r,100));
+      waited += 100;
     }
-    if (typeof cv === 'undefined' || !cv.imread){
-      alert('OpenCV no se cargó. Recarga la página.');
+  }
+  if (typeof cv === 'undefined' || !cv.imread){
+    alert('OpenCV no se cargó. Recarga la página.');
+    return;
+  }
+  log('OpenCV listo — cargando template...');
+
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = TARGET_URL + '?v=' + Date.now();
+  img.onload = () => {
+    // plantamos el template en un canvas y lo convertimos a gray once
+    const tmp = document.createElement('canvas');
+    tmp.width = img.width; tmp.height = img.height;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(img,0,0);
+    templMat = cv.imread(tmp);
+    templGray = new cv.Mat();
+    cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
+
+    // Decide scale para acelerar: procesaremos todo a RES_SCALE de la resol real del video
+    // 0.5 = mitad de resolución en cada eje (rapidez vs precisión)
+    window.RES_SCALE = 0.5;
+
+    // Inicializamos mats ONCE con tamaño reducido
+    const procW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
+    const procH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+
+    // mats sobre los frames reducidos
+    srcMat = new cv.Mat(procH, procW, cv.CV_8UC4);
+    grayMat = new cv.Mat(procH, procW, cv.CV_8UC1);
+
+    // resultado mat tamaño = W - w + 1 ...
+    const resW = procW - templGray.cols + 1;
+    const resH = procH - templGray.rows + 1;
+    // si template es más grande que proc, reduce templ o reduce RES_SCALE
+    if (resW <= 0 || resH <= 0) {
+      alert('El template es más grande que el área de procesamiento. Reduce la resolución del template o cambia RES_SCALE a un valor mayor (p.ej. 0.8).');
       return;
     }
-    log('OpenCV listo — cargando template...');
-    // Cargar imagen de referencia en una imagen DOM oculta
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = TARGET_URL + '?v=' + Date.now(); // cache-busting
-    img.onload = () => {
-      // crear canvas temporal para leer con OpenCV
-      const tmp = document.createElement('canvas');
-      tmp.width = img.width; tmp.height = img.height;
-      const tctx = tmp.getContext('2d');
-      tctx.drawImage(img,0,0);
-      templMat = cv.imread(tmp);
-      templGray = new cv.Mat();
-      cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
-      log('Template cargado: ' + img.width + 'x' + img.height);
-      // inicializar mats para frames
-      srcMat = new cv.Mat(cam.videoHeight, cam.videoWidth, cv.CV_8UC4);
-      grayMat = new cv.Mat(cam.videoHeight, cam.videoWidth, cv.CV_8UC1);
-      // result matrix size = W - w +1, H - h +1
-      resMat = new cv.Mat(cam.videoHeight - templGray.rows + 1, cam.videoWidth - templGray.cols + 1, cv.CV_32FC1);
-      animStart = performance.now();
-      requestAnimationFrame(processFrame);
-    };
-    img.onerror = (e) => {
-      alert('No se pudo cargar target.png desde: ' + TARGET_URL);
-      console.error(e);
-    };
-  }
+    resMat = new cv.Mat(resH, resW, cv.CV_32FC1);
 
+    // creamos un canvas de trabajo (reducción) para dibujar el video en baja resolución
+    window.procCanvas = document.createElement('canvas');
+    procCanvas.width = procW; procCanvas.height = procH;
+    window.procCtx = procCanvas.getContext('2d');
+
+    animStart = performance.now();
+    requestAnimationFrame(processFrame);
+    log('Template cargado: ' + img.width + 'x' + img.height + ' — procesando a ' + procW + 'x' + procH);
+  };
+  img.onerror = (e) => {
+    alert('No se pudo cargar target.png desde: ' + TARGET_URL);
+    console.error(e);
+  };
+}
+
+
+function processFrame(now){
+  if (!streaming) return;
+  try {
+    // Pintar el video escalado en procCanvas
+    procCtx.drawImage(cam, 0, 0, procCanvas.width, procCanvas.height);
+
+    // Leer imageData y actualizar srcMat de forma eficiente
+    const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
+    srcMat.data.set(imageData.data); // evita crear un nuevo Mat cada frame
+
+    // convertir a gris
+    cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
+
+    // matchTemplate (rápido al estar reducido)
+    cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
+    let minVal = {value:0}, maxVal = {value:0}, minLoc = {x:0,y:0}, maxLoc = {x:0,y:0};
+    cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
+    const best = maxVal.value;
+
+    // Limpiar overlay y dibujar debug
+    ctx.clearRect(0,0,overlay.width, overlay.height);
+    ctx.fillStyle = 'white'; ctx.font = '16px Arial';
+    ctx.fillText('Match: ' + best.toFixed(3), 10, 20);
+
+    if (best >= MATCH_THRESHOLD) {
+      // coordenadas en procCanvas -> escalar a overlay (pantalla)
+      const scaleX = overlay.width / procCanvas.width;
+      const scaleY = overlay.height / procCanvas.height;
+
+      const matchX = maxLoc.x + templGray.cols/2;
+      const matchY = maxLoc.y + templGray.rows/2;
+
+      const drawX = overlay.width - (matchX * scaleX); // invertir X por mirror
+      const drawY = matchY * scaleY;
+      const drawW = templGray.cols * scaleX;
+      const drawH = templGray.rows * scaleY;
+
+      // rectángulo de detección
+      ctx.strokeStyle = 'rgba(255,120,200,0.9)';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(overlay.width - ((maxLoc.x + templGray.cols) * scaleX), maxLoc.y * scaleY, drawW, drawH);
+
+      // dibujar corazón con las dimensiones escaladas
+      const elapsed = now - animStart;
+      drawHeart(drawX, drawY, drawW, drawH, elapsed);
+    }
+    // No borres srcMat ni grayMat aquí (se reutilizan)
+
+  } catch(err) {
+    console.error('Error en procesamiento frame (opt):', err);
+  } finally {
+    requestAnimationFrame(processFrame);
+  }
+}
   // procesamiento por frame: matchTemplate
   function processFrame(now){
     if (!streaming) return;
