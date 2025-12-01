@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Debug & Fix</title>
+  <title>AR Camiseta - ORB Matching (skip frames)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -15,7 +15,7 @@
     #startBtn{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 18px;background:#ff4fa8;border-radius:10px;border:none;color:#fff;font-size:18px;z-index:40}
     #note{position:fixed;left:0;right:0;bottom:10px;text-align:center;z-index:40;opacity:0.9}
     #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:40}
-    #bigMatch{position:fixed;left:8px;top:48px;font-size:22px;font-weight:700;color:#fff;text-shadow:0 0 6px #000;z-index:40}
+    #bigMatch{position:fixed;left:8px;top:48px;font-size:20px;font-weight:700;color:#fff;text-shadow:0 0 6px #000;z-index:40}
   </style>
 </head>
 <body>
@@ -24,7 +24,7 @@
     <canvas id="overlay"></canvas>
   </div>
 
-  <!-- Video effect -->
+  <!-- Video efecto -->
   <video id="fxVideo" autoplay loop muted playsinline preload="auto" crossorigin="anonymous" style="will-change:transform;">
     <source src="./animacion.webm" type="video/webm">
   </video>
@@ -39,14 +39,19 @@
   <div id="log">listo</div>
   <div id="bigMatch">Match: --</div>
 
+  <!-- OpenCV.js -->
   <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 
 <script>
-/* CONFIG */
+/* ========== CONFIG ==========
+  Ajusta según pruebas.
+=============================*/
 const TARGET_URL = './target_cropped_512.png';
-let MATCH_THRESHOLD = 0.50;   // bajado para probar; ajusta luego
-let RES_SCALE = 1.0;          // usar resolución completa para evitar "template too large"
-/* end config */
+let RES_SCALE = 1.0;         // 0.7-1.0 dependiendo CPU; 1.0 usa máxima resolución
+let FRAME_SKIP = 2;          // procesar cada N frames (1 = siempre)
+let MATCH_RATIO = 0.75;      // ratio test Lowe
+let minMatchCount = 8;       // mínimo good matches para homografía
+/* =========================== */
 
 const cam = document.getElementById('cam');
 const overlay = document.getElementById('overlay');
@@ -58,13 +63,25 @@ const fxVideo = document.getElementById('fxVideo');
 const testShow = document.getElementById('testShow');
 const testHide = document.getElementById('testHide');
 
-let videoStream = null, streaming = false;
-let srcMat=null, grayMat=null, templMat=null, templGray=null, resMat=null;
-let procCanvas=null, procCtx=null; let animStart=null;
+let videoStream = null;
+let streaming = false;
+
+let srcMat = null, grayMat = null, templMat = null, templGray = null;
+let procCanvas = null, procCtx = null;
+let animStart = null;
+
+// ORB/matcher globals
+let orb = null;
+let bf = null;
+let templKeypoints = null;
+let templDescriptors = null;
+
+// frame skip
+let frameCounter = 0;
 
 function log(s){ logEl.textContent = s; console.log(s); }
 
-/* autoplay helper */
+/* autoplay permission helper */
 function showPlayHint(){
   if (document.getElementById('playHint')) return;
   const b = document.createElement('button');
@@ -75,16 +92,16 @@ function showPlayHint(){
   document.body.appendChild(b);
 }
 
-/* show/hide overlay - improved */
+/* ========== overlay video control ========== */
 function showVideoOverlay(cx, cy, w, h){
   if (!fxVideo) return;
-  // debug
-  log("showVideoOverlay readyState:"+fxVideo.readyState+" paused:"+fxVideo.paused);
-  // compute top-left in screen coords
-  const left = cx - w/2, top = cy - h/2;
+  log("Mostrando video — readyState:" + fxVideo.readyState + " paused:" + fxVideo.paused);
+
+  const left = cx - w/2;
+  const top = cy - h/2;
   const rect = overlay.getBoundingClientRect();
   const absLeft = rect.left + left + window.scrollX;
-  const absTop = rect.top + top + window.scrollY;
+  const absTop  = rect.top  + top  + window.scrollY;
 
   Object.assign(fxVideo.style, {
     position:'fixed',
@@ -98,23 +115,21 @@ function showVideoOverlay(cx, cy, w, h){
     objectFit:'contain'
   });
 
-  // force play (startBtn gives gesture)
   if (fxVideo.paused) {
     fxVideo.play().then(()=>{ log('video play ok'); }).catch(err=>{ log('video play err: '+err); showPlayHint(); });
   }
 }
 function hideVideoOverlay(){ if (!fxVideo) return; try{ fxVideo.pause(); }catch(e){} fxVideo.style.display='none'; fxVideo.style.visibility='hidden'; }
 
-/* test controls */
+/* test buttons */
 testShow.addEventListener('click', ()=>{
-  // center screen
   const rect = overlay.getBoundingClientRect();
   const cx = rect.width/2, cy = rect.height/2;
-  showVideoOverlay(cx, cy, rect.width*0.6, rect.height*0.6);
+  showVideoOverlay(cx, cy, rect.width*0.55, rect.height*0.55);
 });
 testHide.addEventListener('click', ()=>{ hideVideoOverlay(); });
 
-/* camera */
+/* ========== camera start/stop ========== */
 async function startCamera(){
   try {
     videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
@@ -123,132 +138,323 @@ async function startCamera(){
     streaming = true;
     resizeCanvas();
     prepareOpenCV();
-  } catch(e){ alert('Error al abrir la cámara: '+e.message); console.error(e); }
-}
-function stopCamera(){ if (videoStream) videoStream.getTracks().forEach(t=>t.stop()); streaming=false; }
-function resizeCanvas(){ overlay.width = cam.videoWidth; overlay.height = cam.videoHeight; overlay.style.width = cam.clientWidth+'px'; overlay.style.height = cam.clientHeight+'px'; }
-
-/* prepare OpenCV + auto-rescale template if needed */
-async function prepareOpenCV(){
-  log('Esperando OpenCV...');
-  if (typeof cv==='undefined' || !cv.imread){
-    let waited=0; while((typeof cv==='undefined' || !cv.imread) && waited<5000){ await new Promise(r=>setTimeout(r,100)); waited+=100; }
+  } catch(e){
+    alert('Error al abrir la cámara: ' + e.message);
+    console.error(e);
   }
-  if (typeof cv==='undefined' || !cv.imread){ alert('OpenCV no cargó'); return; }
-  log('OpenCV listo — cargando template...');
-  const img = new Image(); img.crossOrigin='anonymous'; img.src = TARGET_URL + '?v=' + Date.now();
-  img.onload = ()=>{
-    const tmp = document.createElement('canvas'); tmp.width=img.width; tmp.height=img.height;
-    const tctx = tmp.getContext('2d'); tctx.drawImage(img,0,0);
-    if (templMat) { templMat.delete(); templMat=null; } if (templGray) { templGray.delete(); templGray=null; }
-    templMat = cv.imread(tmp); templGray = new cv.Mat(); cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
+}
+function stopCamera(){ if (videoStream) videoStream.getTracks().forEach(t=>t.stop()); streaming = false; }
+function resizeCanvas(){ overlay.width = cam.videoWidth; overlay.height = cam.videoHeight; overlay.style.width = cam.clientWidth + 'px'; overlay.style.height = cam.clientHeight + 'px'; }
 
-    const procW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
-    const procH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+/* ========== prepareOpenCV (ORB) ========== */
+async function prepareOpenCV(){
+  log("Esperando OpenCV...");
+  if (typeof cv === "undefined" || !cv.imread){
+    let waited=0;
+    while((typeof cv === "undefined" || !cv.imread) && waited < 5000){ await new Promise(r=>setTimeout(r,100)); waited += 100; }
+  }
+  if (typeof cv === "undefined" || !cv.imread){
+    alert("OpenCV no cargó");
+    return;
+  }
 
-    // if template bigger than proc area, rescale template to 90% of proc area
-    if (templGray.cols > procW || templGray.rows > procH){
-      const scale = Math.min((procW*0.9)/templGray.cols, (procH*0.9)/templGray.rows);
-      const newW = Math.max(8, Math.round(templMat.cols * scale));
-      const newH = Math.max(8, Math.round(templMat.rows * scale));
-      const tmp2 = document.createElement('canvas'); tmp2.width=newW; tmp2.height=newH;
-      const t2 = tmp2.getContext('2d'); t2.drawImage(tmp,0,0,tmp.width,tmp.height,0,0,newW,newH);
-      templMat.delete(); templGray.delete();
-      templMat = cv.imread(tmp2); templGray = new cv.Mat(); cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
-      log('Template reescalado a '+templGray.cols+'x'+templGray.rows);
-    } else {
-      log('Template cargado: '+templGray.cols+'x'+templGray.rows+' (proc '+procW+'x'+procH+')');
+  log("OpenCV listo — cargando template (ORB)...");
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = TARGET_URL + "?v=" + Date.now();
+
+  img.onload = () => {
+    // read template into canvas
+    const tmp = document.createElement('canvas');
+    tmp.width = img.width;
+    tmp.height = img.height;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(img, 0, 0);
+
+    // cleanup previous
+    try { if (templKeypoints) templKeypoints.delete(); } catch(e){}
+    try { if (templDescriptors) templDescriptors.delete(); } catch(e){}
+    if (templMat) { templMat.delete(); templMat = null; }
+    if (templGray) { templGray.delete(); templGray = null; }
+
+    templMat = cv.imread(tmp);
+    templGray = new cv.Mat();
+    cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
+
+    // equalize to improve contrast
+    try { let eq = new cv.Mat(); cv.equalizeHist(templGray, eq); templGray.delete(); templGray = eq; } catch(e){}
+
+    // init ORB & BFMatcher
+    try {
+      orb = new cv.ORB(); // may work on many builds
+    } catch(e){
+      // some builds expose ORB differently; try fallback attempt
+      try { orb = new cv.ORB(); } catch(err){ console.warn("ORB not available in this build:", err); }
+    }
+    bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+
+    // detect & compute template keypoints/descriptors
+    templKeypoints = new cv.KeyPointVector();
+    templDescriptors = new cv.Mat();
+    try {
+      orb.detect(templGray, templKeypoints);
+      orb.compute(templGray, templKeypoints, templDescriptors);
+    } catch(e){
+      try {
+        orb.detectAndCompute(templGray, new cv.Mat(), templKeypoints, templDescriptors);
+      } catch(err){
+        console.error("Error ORB detect/compute on template:", err);
+        alert("Error: ORB detect/compute no funcionó en esta build de OpenCV.js");
+        return;
+      }
     }
 
-    // init proc canvas & mats
-    procCanvas = document.createElement('canvas'); procCanvas.width = procW; procCanvas.height = procH;
-    procCtx = procCanvas.getContext('2d', {willReadFrequently:true});
+    log('Template ORB: keypoints=' + templKeypoints.size() + ' descriptors: ' + templDescriptors.rows);
 
-    if (srcMat) { srcMat.delete(); srcMat=null; } if (grayMat) { grayMat.delete(); grayMat=null; } if (resMat) { resMat.delete(); resMat=null; }
+    // prepare proc canvas and mats
+    const procW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
+    const procH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
+    procCanvas = document.createElement('canvas');
+    procCanvas.width = procW;
+    procCanvas.height = procH;
+    procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
+    if (srcMat) { srcMat.delete(); srcMat = null; }
+    if (grayMat) { grayMat.delete(); grayMat = null; }
 
     srcMat = new cv.Mat(procH, procW, cv.CV_8UC4);
     grayMat = new cv.Mat(procH, procW, cv.CV_8UC1);
 
-    const resW = procW - templGray.cols + 1; const resH = procH - templGray.rows + 1;
-    if (resW>0 && resH>0){ resMat = new cv.Mat(resH, resW, cv.CV_32FC1); log('Preparado: resMat OK'); }
-    else { resMat = null; log('AVISO: resMat inválida'); }
-
     animStart = performance.now();
     requestAnimationFrame(processFrame);
   };
-  img.onerror = e=>{ alert('No se pudo cargar ' + TARGET_URL); console.error(e); };
+
+  img.onerror = e => { alert("No se pudo cargar " + TARGET_URL); console.error(e); };
 }
 
-/* process frame */
+/* ========== processFrame (ORB + FRAME_SKIP) ========== */
 function processFrame(now){
   if (!streaming) return;
+
   try {
+    // frame skipping
+    frameCounter = (frameCounter + 1) % FRAME_SKIP;
+
     const pW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
     const pH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
 
-    if (!procCanvas || procCanvas.width!==pW || procCanvas.height!==pH){
-      if (srcMat) srcMat.delete(); if (grayMat) grayMat.delete(); if (resMat) resMat.delete();
-      procCanvas = document.createElement('canvas'); procCanvas.width=pW; procCanvas.height=pH;
-      procCtx = procCanvas.getContext('2d', {willReadFrequently:true});
+    // recreate mats if resolution changed
+    if (!procCanvas || procCanvas.width !== pW || procCanvas.height !== pH){
+      if (srcMat) { srcMat.delete(); srcMat = null; }
+      if (grayMat) { grayMat.delete(); grayMat = null; }
+
+      procCanvas = document.createElement('canvas');
+      procCanvas.width = pW; procCanvas.height = pH;
+      procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
       srcMat = new cv.Mat(pH, pW, cv.CV_8UC4);
       grayMat = new cv.Mat(pH, pW, cv.CV_8UC1);
-      const resW = pW - (templGray?templGray.cols:0) + 1; const resH = pH - (templGray?templGray.rows:0) + 1;
-      if (resW>0 && resH>0) resMat = new cv.Mat(resH, resW, cv.CV_32FC1); else resMat = null;
-      log('Reiniciado procesado: '+pW+'x'+pH+' (resMat '+(resMat?'ok':'INVALID')+')');
+
+      log('Reiniciado procesador: ' + pW + 'x' + pH);
     }
 
-    procCtx.drawImage(cam,0,0,pW,pH);
+    // always update reduced canvas
+    procCtx.drawImage(cam, 0, 0, pW, pH);
     const imageData = procCtx.getImageData(0,0,pW,pH);
-    if (srcMat && srcMat.data && srcMat.data.length === imageData.data.length) srcMat.data.set(imageData.data);
-    else srcMat = cv.imread(procCanvas);
+    if (srcMat && srcMat.data && srcMat.data.length === imageData.data.length){
+      srcMat.data.set(imageData.data);
+    } else {
+      srcMat = cv.imread(procCanvas);
+    }
 
+    // if not processing frame, keep last overlay and return
+    if (frameCounter !== 0){
+      requestAnimationFrame(processFrame);
+      return;
+    }
+
+    // heavy processing begins
     cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
 
-    if (!resMat || resMat.rows<=0 || resMat.cols<=0){
-      ctx.clearRect(0,0,overlay.width,overlay.height);
-      ctx.fillStyle='white'; ctx.font='14px Arial'; ctx.fillText('Template demasiado grande para área procesada. Ajustando...',10,24);
-      hideVideoOverlay(); requestAnimationFrame(processFrame); return;
+    // detect + compute on frame
+    let frameKeypoints = new cv.KeyPointVector();
+    let frameDescriptors = new cv.Mat();
+    try {
+      orb.detect(grayMat, frameKeypoints);
+      orb.compute(grayMat, frameKeypoints, frameDescriptors);
+    } catch(e){
+      try {
+        orb.detectAndCompute(grayMat, new cv.Mat(), frameKeypoints, frameDescriptors);
+      } catch(err){
+        console.error('ORB detect/compute error on frame:', err);
+        frameKeypoints.delete(); frameDescriptors.delete();
+        requestAnimationFrame(processFrame);
+        return;
+      }
     }
 
-    cv.matchTemplate(grayMat, templGray, resMat, cv.TM_CCOEFF_NORMED);
-    let minVal={value:0}, maxVal={value:0}, minLoc={x:0,y:0}, maxLoc={x:0,y:0};
-    cv.minMaxLoc(resMat, minVal, maxVal, minLoc, maxLoc);
-    const best = maxVal.value;
+    const tplK = templKeypoints ? templKeypoints.size() : 0;
+    const frmK = frameKeypoints ? frameKeypoints.size() : 0;
 
-    // show big match value
-    bigMatch.textContent = 'Match: ' + best.toFixed(3);
+    // if no keypoints -> skip
+    if (!tplK || !frmK){
+      ctx.clearRect(0,0,overlay.width, overlay.height);
+      ctx.fillStyle='white'; ctx.font='16px Arial';
+      ctx.fillText('Match: -- (kp tpl:'+tplK+' frm:'+frmK+')',10,20);
+      frameKeypoints.delete(); frameDescriptors.delete();
+      hideVideoOverlay();
+      requestAnimationFrame(processFrame);
+      return;
+    }
 
-    ctx.clearRect(0,0,overlay.width,overlay.height);
-    ctx.fillStyle='white'; ctx.font='16px Arial'; ctx.fillText('Match: '+best.toFixed(3),10,20);
+    // knnMatch
+    let matches = new cv.DMatchVectorVector();
+    try {
+      bf.knnMatch(frameDescriptors, templDescriptors, matches, 2);
+    } catch(e){
+      try { bf.knnMatch(templDescriptors, frameDescriptors, matches, 2); }
+      catch(err){ console.error('BFMatcher.knnMatch failed', err); matches.delete(); frameKeypoints.delete(); frameDescriptors.delete(); requestAnimationFrame(processFrame); return; }
+    }
 
-    if (best >= MATCH_THRESHOLD){
-      const sX = overlay.width / pW; const sY = overlay.height / pH;
-      const matchX = maxLoc.x + templGray.cols/2; const matchY = maxLoc.y + templGray.rows/2;
-      const drawX = matchX * sX; const drawY = matchY * sY;
-      const drawW = templGray.cols * sX; const drawH = templGray.rows * sY;
-      ctx.strokeStyle='rgba(255,120,200,0.9)'; ctx.lineWidth=4;
-      ctx.strokeRect(maxLoc.x*sX, maxLoc.y*sY, drawW, drawH);
+    // ratio test
+    let goodMatches = [];
+    for (let i=0; i < matches.size(); i++){
+      const mv = matches.get(i);
+      if (mv.size() >= 2){
+        const m = mv.get(0);
+        const n = mv.get(1);
+        if (m.distance <= MATCH_RATIO * n.distance){
+          goodMatches.push(m);
+        } else {
+          m.delete();
+        }
+        n.delete();
+      } else if (mv.size() === 1){
+        const m = mv.get(0);
+        if (m.distance < 30) goodMatches.push(m); else m.delete();
+      }
+      mv.delete();
+    }
+    matches.delete();
+
+    // insufficient matches?
+    if (goodMatches.length < minMatchCount){
+      for (let gm of goodMatches) try{ gm.delete(); } catch(e){}
+      frameKeypoints.delete(); frameDescriptors.delete();
+      ctx.clearRect(0,0,overlay.width, overlay.height);
+      ctx.fillStyle='white'; ctx.font='16px Arial';
+      ctx.fillText('Matches: ' + (goodMatches.length) + ' (need '+minMatchCount+')',10,20);
+      bigMatch.textContent = 'Matches: ' + (goodMatches.length);
+      hideVideoOverlay();
+      requestAnimationFrame(processFrame);
+      return;
+    }
+
+    // build point arrays for homography
+    const srcPts = [];
+    const dstPts = [];
+    for (let i=0; i<goodMatches.length; i++){
+      const m = goodMatches[i];
+      const queryIdx = m.queryIdx; // index in frame
+      const trainIdx = m.trainIdx; // index in template
+      const kpFrame = frameKeypoints.get(queryIdx);
+      const kpTpl = templKeypoints.get(trainIdx);
+      srcPts.push(kpFrame.pt.x, kpFrame.pt.y);
+      dstPts.push(kpTpl.pt.x, kpTpl.pt.y);
+    }
+
+    let srcMatPts = cv.matFromArray(goodMatches.length, 1, cv.CV_32FC2, srcPts);
+    let dstMatPts = cv.matFromArray(goodMatches.length, 1, cv.CV_32FC2, dstPts);
+    let mask = new cv.Mat();
+    let H = cv.findHomography(srcMatPts, dstMatPts, cv.RANSAC, 5.0, mask);
+
+    // count inliers
+    let inliers = 0;
+    for (let i=0; i<mask.rows; i++){
+      if (mask.ucharPtr(i,0)[0]) inliers++;
+    }
+
+    ctx.clearRect(0,0,overlay.width, overlay.height);
+    ctx.fillStyle='white'; ctx.font='16px Arial';
+    ctx.fillText('Matches: ' + goodMatches.length + ' inliers:' + inliers,10,20);
+    bigMatch.textContent = 'Matches: ' + goodMatches.length + ' | Inliers: ' + inliers;
+
+    if (!H.empty() && inliers >= Math.max(6, Math.floor(goodMatches.length * 0.3))){
+      // invert homography to map template -> frame
+      let H_inv = new cv.Mat();
+      cv.invert(H, H_inv, cv.DECOMP_LU);
+
+      // template corners
+      const tw = templGray.cols, th = templGray.rows;
+      const tplCorners = cv.matFromArray(4,1,cv.CV_32FC2, [0,0, tw,0, tw,th, 0,th]);
+      let dstCorners = new cv.Mat();
+      cv.perspectiveTransform(tplCorners, dstCorners, H_inv);
+
+      const scaleX = overlay.width / srcMat.cols;
+      const scaleY = overlay.height / srcMat.rows;
+
+      const x0 = dstCorners.floatAt(0,0), y0 = dstCorners.floatAt(0,1);
+      const x1 = dstCorners.floatAt(1,0), y1 = dstCorners.floatAt(1,1);
+      const x2 = dstCorners.floatAt(2,0), y2 = dstCorners.floatAt(2,1);
+      const x3 = dstCorners.floatAt(3,0), y3 = dstCorners.floatAt(3,1);
+
+      const minX = Math.min(x0,x1,x2,x3), maxX = Math.max(x0,x1,x2,x3);
+      const minY = Math.min(y0,y1,y2,y3), maxY = Math.max(y0,y1,y2,y3);
+      const drawW = (maxX - minX) * scaleX;
+      const drawH = (maxY - minY) * scaleY;
+      const drawX = (minX + (maxX - minX)/2) * scaleX;
+      const drawY = (minY + (maxY - minY)/2) * scaleY;
+
+      // draw polygon for debug
+      ctx.strokeStyle = 'rgba(0,255,150,0.95)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(x0*scaleX, y0*scaleY);
+      ctx.lineTo(x1*scaleX, y1*scaleY);
+      ctx.lineTo(x2*scaleX, y2*scaleY);
+      ctx.lineTo(x3*scaleX, y3*scaleY);
+      ctx.closePath();
+      ctx.stroke();
+
+      // show animation overlay
       showVideoOverlay(drawX, drawY, drawW, drawH);
+
+      tplCorners.delete(); dstCorners.delete(); H_inv.delete();
     } else {
       hideVideoOverlay();
     }
 
+    // cleanup
+    srcMatPts.delete(); dstMatPts.delete(); mask.delete();
+    if (H && !H.isDeleted) H.delete();
+    for (let gm of goodMatches) try{ gm.delete(); } catch(e){}
+    frameKeypoints.delete(); frameDescriptors.delete();
+
   } catch(err){
-    console.error('Error procesando frame:', err);
+    console.error('Error procesando frame (ORB):', err);
   } finally {
     requestAnimationFrame(processFrame);
   }
 }
 
-/* start button */
+/* ========== start button ========== */
 startBtn.addEventListener('click', async ()=>{
-  startBtn.disabled=true; startBtn.style.display='none'; log('Activando cámara...');
+  startBtn.disabled = true;
+  startBtn.style.display = 'none';
+  log('Activando cámara...');
   await startCamera();
 });
 
-/* cleanup */
+/* ========== cleanup on pagehide ========== */
 window.addEventListener('pagehide', ()=>{
-  try { if (srcMat) srcMat.delete(); if (grayMat) grayMat.delete(); if (templMat) templMat.delete(); if (templGray) templGray.delete(); if (resMat) resMat.delete(); } catch(e){}
+  try {
+    if (srcMat) { srcMat.delete(); srcMat = null; }
+    if (grayMat) { grayMat.delete(); grayMat = null; }
+    if (templMat) { templMat.delete(); templMat = null; }
+    if (templGray) { templGray.delete(); templGray = null; }
+    if (templKeypoints) { templKeypoints.delete(); templKeypoints = null; }
+    if (templDescriptors) { templDescriptors.delete(); templDescriptors = null; }
+  } catch(e){}
   stopCamera();
 });
 </script>
