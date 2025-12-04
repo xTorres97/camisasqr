@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Optical Flow (Optimizado)</title>
+  <title>AR Camiseta - Mejorado (CLAHE + crossCheck + modos)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -25,6 +25,7 @@
     #log{position:fixed;left:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:6px;font-size:12px;z-index:40}
     #bigMatch{position:fixed;left:8px;top:48px;font-size:18px;font-weight:700;color:#fff;text-shadow:0 0 6px #000;z-index:40}
     #forcePlay{position:fixed;left:50%;top:70%;transform:translate(-50%,-50%);z-index:10001;padding:12px 18px;background:#ff4fa8;color:#fff;border-radius:8px;border:none;display:none}
+    #modeLabel{font-size:12px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.06);display:inline-block}
   </style>
 </head>
 <body>
@@ -38,6 +39,8 @@
   <div id="controls">
     <button id="testShow" class="ctrlBtn">Mostrar animación de prueba</button>
     <button id="testHide" class="ctrlBtn">Ocultar animación</button>
+    <button id="toggleMode" class="ctrlBtn">Modo: Precisión</button>
+    <div id="modeLabel">RES_SCALE: <span id="mscale">0.40</span></div>
   </div>
 
   <button id="startBtn">Activar AR</button>
@@ -51,17 +54,21 @@
 
 <script>
 /* ---------- CONFIG (AJUSTABLE) ---------- */
-const TARGET_URL = './ilustracion.png';
-let RES_SCALE = 0.25;        // <<--- reducir para mejorar velocidad
-let FRAME_SKIP = 3;          // procesar 1 cada N frames (OR detección completa)
-let MATCH_RATIO = 0.75;
+/* Por defecto usamos una escala mayor (0.40) para pruebas — después podés reducir */
+let RES_SCALE = 0.40;        // escala de procesamiento (0.25..0.5 para pruebas)
+let FRAME_SKIP = 3;          // procesar 1 cada N frames
+let MATCH_RATIO = 0.9;       // ratio de Lowe (relajado para diagnosticar)
 let minMatchCount = 6;
-const MAX_GOOD_MATCHES = 100; // cap para matches
-const MAX_TEMPL_SIZE = 512;   // reducir template grande al cargar
-const MIN_TRACK_POINTS = 6;   // puntos mínimos para confiar en optical flow
-const REDETECT_AFTER_SECONDS = 2.5; // tiempo tras el cual forzamos nueva detección parcial
+let MAX_GOOD_MATCHES = 150;  // cap para matches (mayor en modo precisión)
+const MAX_TEMPL_SIZE = 800;  // CONSIDERA aumentar si tu template queda pequeño
+const MIN_TRACK_POINTS = 6;
+const REDETECT_AFTER_SECONDS = 2.5;
+
+const TARGET_URL = './ilustracion.png';
+const ANIM_URL = './Animacion.webm';
 /* ---------------------------------------- */
 
+/* Estado y elementos DOM */
 const cam = document.getElementById('cam');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
@@ -72,6 +79,8 @@ const overlayContainer = document.getElementById('overlayContainer');
 const testShow = document.getElementById('testShow');
 const testHide = document.getElementById('testHide');
 const forcePlay = document.getElementById('forcePlay');
+const toggleModeBtn = document.getElementById('toggleMode');
+const modeScaleEl = document.getElementById('mscale');
 
 let videoStream = null, streaming = false;
 let srcMat=null, grayMat=null, templMat=null, templGray=null;
@@ -80,15 +89,20 @@ let orb=null, bf=null, templKeypoints=null, templDescriptors=null;
 let frameCounter = 0;
 let detectionLockedUntil = 0;
 
-// TRACKING state (optical flow)
+/* tracking estado (optical flow) */
 let trackingActive = false;
 let prevGray = null;
-let prevPts = null;        // CV_32FC2 Nx1 (puntos en frame)
-let templPts = null;       // CV_32FC2 Nx1 (puntos correspondientes en template)
+let prevPts = null;
+let templPts = null;
 let lastValidHomography = null;
 let lastTrackTime = 0;
 
+/* matcher config (usar crossCheck por defecto) */
+let USE_CROSSCHECK = true;
+
+/* UI helpers */
 function log(s){ logEl.textContent = s; console.log(s); }
+function setModeLabel(){ modeScaleEl.textContent = RES_SCALE.toFixed(2); }
 
 /* overlay video markup */
 const overlayVideoMarkup = (filename) => `
@@ -104,7 +118,7 @@ function showOverlayCentered(cx, cy, w, h, angleDeg = 0){
   const screenY = rect.top + cy + window.scrollY;
 
   if (!document.getElementById('fxVideo')){
-    overlayContainer.innerHTML = overlayVideoMarkup('./Animacion.webm');
+    overlayContainer.innerHTML = overlayVideoMarkup(ANIM_URL);
   }
   const fx = document.getElementById('fxVideo');
   overlayContainer.style.left = screenX + 'px';
@@ -126,6 +140,32 @@ forcePlay.addEventListener('click', ()=>{ const fx = document.getElementById('fx
 testShow.addEventListener('click', ()=>{ const r = overlay.getBoundingClientRect(); showOverlayCentered(r.width/2, r.height/2, r.width*0.5, r.height*0.5, 0); });
 testHide.addEventListener('click', ()=>{ hideOverlay(); });
 
+/* toggle precision/velocidad */
+let currentMode = 'precision'; // 'precision' | 'speed'
+toggleModeBtn.addEventListener('click', ()=>{
+  if (currentMode === 'precision'){
+    // pasar a modo velocidad
+    currentMode = 'speed';
+    RES_SCALE = 0.28;
+    FRAME_SKIP = 4;
+    MATCH_RATIO = 0.85;
+    MAX_GOOD_MATCHES = 80;
+    USE_CROSSCHECK = false;
+    toggleModeBtn.textContent = 'Modo: Velocidad';
+    log('Modo Velocidad activado');
+  } else {
+    currentMode = 'precision';
+    RES_SCALE = 0.40;
+    FRAME_SKIP = 3;
+    MATCH_RATIO = 0.9;
+    MAX_GOOD_MATCHES = 150;
+    USE_CROSSCHECK = true;
+    toggleModeBtn.textContent = 'Modo: Precisión';
+    log('Modo Precisión activado');
+  }
+  setModeLabel();
+});
+
 /* camera start/stop */
 async function startCamera(){
   try {
@@ -143,12 +183,12 @@ async function startCamera(){
 function stopCamera(){ if (videoStream) videoStream.getTracks().forEach(t=>t.stop()); streaming=false; }
 function resizeCanvas(){ overlay.width = cam.videoWidth; overlay.height = cam.videoHeight; overlay.style.width = cam.clientWidth + 'px'; overlay.style.height = cam.clientHeight + 'px'; }
 
-/* prepareOpenCV with template resize (faster) */
+/* prepareOpenCV: carga template, aplica CLAHE, init ORB/BF */
 async function prepareOpenCV(){
   log("Esperando OpenCV...");
   if (typeof cv === 'undefined' || !cv.imread){
     let waited=0;
-    while((typeof cv === 'undefined' || !cv.imread) && waited<5000){ await new Promise(r=>setTimeout(r,100)); waited+=100; }
+    while((typeof cv === 'undefined' || !cv.imread) && waited<8000){ await new Promise(r=>setTimeout(r,100)); waited+=100; }
   }
   if (typeof cv === 'undefined' || !cv.imread){ alert('OpenCV no cargó'); return; }
 
@@ -169,7 +209,7 @@ async function prepareOpenCV(){
     const tctx = tmp.getContext('2d');
     tctx.drawImage(img, 0, 0, tw, th);
 
-    // cleanup previous
+    // cleanup previous (si existía)
     try{ if (templKeypoints){ templKeypoints.delete(); templKeypoints = null; } }catch(e){}
     try{ if (templDescriptors){ templDescriptors.delete(); templDescriptors = null; } }catch(e){}
     try{ if (templMat){ templMat.delete(); templMat = null; } }catch(e){}
@@ -179,9 +219,26 @@ async function prepareOpenCV(){
     templGray = new cv.Mat();
     cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
 
-    // init ORB & BFMatcher
-    try { orb = new cv.ORB(); } catch(e){ console.warn('ORB init error', e); }
-    bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    // APPLY CLAHE (si disponible) para mejorar detección en zonas con poco contraste
+    try {
+      let clahe = new cv.CLAHE(2.0, new cv.Size(8,8)); // clipLimit, tileGridSize
+      let templGrayEq = new cv.Mat();
+      clahe.apply(templGray, templGrayEq);
+      templGray.delete();
+      templGray = templGrayEq;
+      clahe.delete();
+      console.log('CLAHE aplicado al template');
+    } catch(e){ console.warn('CLAHE no disponible en esta build, se ignora', e); }
+
+    // init ORB & BFMatcher (con crossCheck opcional)
+    try {
+      try { orb = new cv.ORB(1000, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
+      if (USE_CROSSCHECK) bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+      else bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    } catch(e){
+      console.warn('ORB/BF init error', e);
+      try { orb = new cv.ORB(); bf = new cv.BFMatcher(cv.NORM_HAMMING, false); } catch(err){ console.error(err); }
+    }
 
     templKeypoints = new cv.KeyPointVector();
     templDescriptors = new cv.Mat();
@@ -193,6 +250,7 @@ async function prepareOpenCV(){
     }
 
     log('Template loaded. KP:'+templKeypoints.size() + ' desc rows:' + templDescriptors.rows);
+    console.log('Template size (w,h):', templGray.cols, templGray.rows);
 
     /* prepare processing mats at scaled resolution */
     const procW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
@@ -205,6 +263,7 @@ async function prepareOpenCV(){
     grayMat = new cv.Mat(procH, procW, cv.CV_8UC1);
 
     // start loop
+    setModeLabel();
     scheduleNextFrame();
   };
 
@@ -220,9 +279,6 @@ function scheduleNextFrame(){
     requestAnimationFrame(processFrame);
   }
 }
-
-/* convert KeyPoint to point array (frame coords) */
-function keypointToXY(kp){ return {x: kp.pt.x, y: kp.pt.y}; }
 
 /* main loop: si trackingActive -> optical flow; si no -> ORB detection */
 function processFrame(now){
@@ -256,58 +312,56 @@ function processFrame(now){
     }
     cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
 
-    // Si tracking activo: intentar optical flow
+    // aplicar CLAHE en frame si está disponible
+    try {
+      let claheF = new cv.CLAHE(2.0, new cv.Size(8,8));
+      let frameEq = new cv.Mat();
+      claheF.apply(grayMat, frameEq);
+      grayMat.delete();
+      grayMat = frameEq;
+      claheF.delete();
+    } catch(e){ /* no disponible: ok */ }
+
+    // Si tracking activo -> optical flow
     if (trackingActive){
-      // tiempo desde último track válido — si pasa mucho, forzamos re-detección
       if (performance.now() - lastTrackTime > REDETECT_AFTER_SECONDS * 1000){
         trackingActive = false;
-        log('Forzando re-detección por tiempo'); 
+        log('Forzando re-detección por tiempo');
       } else {
-        // calcOpticalFlowPyrLK
         try {
           let nextPts = new cv.Mat();
           let status = new cv.Mat();
           let err = new cv.Mat();
-          // prevPts y prevGray existen y están en resolución pW x pH
           cv.calcOpticalFlowPyrLK(prevGray, grayMat, prevPts, nextPts, status, err, new cv.Size(21,21), 3);
-          
-          // filtrar buenos puntos y mapear con templPts
-          const goodPrev = [];
+
           const goodNext = [];
           const goodTempl = [];
           for (let i=0;i<status.rows;i++){
             if (status.ucharPtr(i,0)[0] === 1){
-              // nextPts is CV_32FC2: floatAt(row,0) gives x then y? Use data directly
               const nx = nextPts.floatAt(i,0);
               const ny = nextPts.floatAt(i,1);
               const tx = templPts.floatAt(i,0);
               const ty = templPts.floatAt(i,1);
-              // sanity check: coordinates valid
               if (!isFinite(nx) || !isFinite(ny)) continue;
               goodNext.push(nx, ny);
               goodTempl.push(tx, ty);
             }
           }
 
-          // cleanup mats we won't reuse
           nextPts.delete(); status.delete(); err.delete();
 
           if (goodNext.length / 2 < MIN_TRACK_POINTS){
-            // tracking lost -> volver a detección completa
             trackingActive = false;
             log('Tracking falló (pocos puntos). Volviendo a detección completa.');
-            // limpiar prev mats
             try{ if (prevPts){ prevPts.delete(); prevPts = null; } }catch(e){}
             try{ if (prevGray){ prevGray.delete(); prevGray = null; } }catch(e){}
           } else {
-            // construir mats para findHomography: src=framePoints(next), dst=templPoints
             const n = goodNext.length/2;
             const nextMat = cv.matFromArray(n, 1, cv.CV_32FC2, goodNext);
             const templSubMat = cv.matFromArray(n, 1, cv.CV_32FC2, goodTempl);
             let mask = new cv.Mat();
             let H = cv.findHomography(nextMat, templSubMat, cv.RANSAC, 5.0, mask);
 
-            // Calcular inliers count
             let inliers = 0;
             for (let i=0;i<mask.rows;i++) if (mask.ucharPtr(i,0)[0]) inliers++;
 
@@ -317,7 +371,6 @@ function processFrame(now){
             bigMatch.textContent = 'Track pts:' + n + ' | Inliers:' + inliers;
 
             if (!H.empty() && inliers >= Math.max(4, Math.floor(n * 0.25))){
-              // invert H para mappear template->frame (igual que antes)
               let H_inv = new cv.Mat(); cv.invert(H, H_inv, cv.DECOMP_LU);
               const tw = templGray.cols, th = templGray.rows;
               const tplCorners = cv.matFromArray(4,1,cv.CV_32FC2, [0,0, tw,0, tw,th, 0,th]);
@@ -339,7 +392,6 @@ function processFrame(now){
               const drawCX = centerX*scaleX, drawCY = centerY*scaleY;
               const angleRad = Math.atan2(y1-y0, x1-x0); const angleDeg = angleRad*180/Math.PI;
 
-              // debug polygon
               ctx.strokeStyle='rgba(0,255,150,0.95)'; ctx.lineWidth=3;
               ctx.beginPath();
               ctx.moveTo(x0*scaleX, y0*scaleY);
@@ -349,15 +401,14 @@ function processFrame(now){
               ctx.closePath(); ctx.stroke();
 
               showOverlayCentered(drawCX, drawCY, drawW, drawH, angleDeg);
-              lastValidHomography && (lastValidHomography.delete(), lastValidHomography = null);
+              if (lastValidHomography){ lastValidHomography.delete(); lastValidHomography = null; }
               lastValidHomography = H.clone();
               H_inv.delete(); tplCorners.delete(); dstCorners.delete();
             } else {
               hideOverlay();
             }
 
-            // preparar siguiente iteración: prevGray = grayMat.clone(); prevPts = nextMat filtered by mask
-            // crear filtered next pts by mask
+            // build filtered prevPts & templPts by mask
             const goodNextFiltered = [];
             const goodTemplFiltered = [];
             for (let i=0;i<mask.rows;i++){
@@ -366,38 +417,32 @@ function processFrame(now){
                 goodTemplFiltered.push(goodTempl[2*i], goodTempl[2*i+1]);
               }
             }
-            // liberar mats antiguos
+
             try{ if (prevPts){ prevPts.delete(); prevPts = null; } }catch(e){}
             try{ if (prevGray){ prevGray.delete(); prevGray = null; } }catch(e){}
+            try{ if (templPts){ templPts.delete(); templPts = null; } }catch(e){}
 
             prevPts = cv.matFromArray(goodNextFiltered.length/2, 1, cv.CV_32FC2, goodNextFiltered);
-            // IMPORTANT: templPts must always correspond in index order with prevPts
-            templPts.delete(); templPts = cv.matFromArray(goodTemplFiltered.length/2, 1, cv.CV_32FC2, goodTemplFiltered);
-
+            templPts = cv.matFromArray(goodTemplFiltered.length/2, 1, cv.CV_32FC2, goodTemplFiltered);
             prevGray = grayMat.clone();
             lastTrackTime = performance.now();
 
-            // cleanup temporales
             nextMat.delete(); templSubMat.delete(); mask.delete();
-            // H is cloned earlier if used; delete original
             if (H && !H.isDeleted) H.delete();
           }
 
         } catch(err){
           console.error('Optical flow error', err);
-          // en caso de error, caer a detección completa
           trackingActive = false;
         }
 
-        // schedule next
         scheduleNextFrame();
         return;
       }
-    } // end if trackingActive
+    }
 
-    // si no estamos en tracking: ejecutar detección cada FRAME_SKIP frames
+    // si no tracking: ejecutar detección cada FRAME_SKIP frames
     if (frameCounter !== 0){
-      // solamente dibujar status
       ctx.clearRect(0,0,overlay.width, overlay.height);
       ctx.fillStyle='white'; ctx.font='14px Arial';
       ctx.fillText('Esperando detección... (frameskip: '+FRAME_SKIP+')',10,20);
@@ -405,7 +450,7 @@ function processFrame(now){
       return;
     }
 
-    // ORB detection + matching (similar a tu flujo original)
+    // ORB detection + matching
     let frameKeypoints = new cv.KeyPointVector();
     let frameDescriptors = new cv.Mat();
     try {
@@ -417,6 +462,8 @@ function processFrame(now){
 
     const tplK = templKeypoints ? templKeypoints.size() : 0;
     const frmK = frameKeypoints ? frameKeypoints.size() : 0;
+    console.log('templ KP:', tplK, 'frame KP:', frmK, 'frame desc rows:', frameDescriptors.rows);
+
     if (!tplK || !frmK){
       ctx.clearRect(0,0,overlay.width, overlay.height);
       ctx.fillStyle='white'; ctx.font='14px Arial';
@@ -427,29 +474,46 @@ function processFrame(now){
       return;
     }
 
-    // knn match
-    let matches = new cv.DMatchVectorVector();
-    try { bf.knnMatch(frameDescriptors, templDescriptors, matches, 2); }
-    catch(e){ console.error('knnMatch err', e); matches.delete(); frameKeypoints.delete(); frameDescriptors.delete(); scheduleNextFrame(); return; }
-
-    // ratio test -> plain JS objects
+    // matching: si usamos crossCheck -> match(); si no -> knn + ratio
     let goodMatches = [];
-    for (let i = 0; i < matches.size(); i++){
-      const mv = matches.get(i);
-      if (mv.size() >= 2){
-        const m = mv.get(0), n = mv.get(1);
-        if (m.distance <= MATCH_RATIO * n.distance){
-          goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+    if (bf && USE_CROSSCHECK){
+      // bf created with crossCheck = true
+      try {
+        let allMatches = new cv.DMatchVector();
+        bf.match(frameDescriptors, templDescriptors, allMatches);
+        for (let i=0;i<allMatches.size();i++){
+          const m = allMatches.get(i);
+          // umbral absoluto (ajustable)
+          if (m.distance < 70){
+            goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+          }
+          m.delete();
+          if (goodMatches.length >= MAX_GOOD_MATCHES) break;
         }
-      } else if (mv.size() === 1){
-        const m = mv.get(0);
-        if (m.distance < 30) goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+        allMatches.delete();
+      } catch(e){ console.error('bf.match err', e); }
+    } else {
+      let matches = new cv.DMatchVectorVector();
+      try { bf.knnMatch(frameDescriptors, templDescriptors, matches, 2); }
+      catch(e){ console.error('knnMatch err', e); }
+      for (let i = 0; i < matches.size(); i++){
+        const mv = matches.get(i);
+        if (mv.size() >= 2){
+          const m = mv.get(0), n = mv.get(1);
+          if (m.distance <= MATCH_RATIO * n.distance){
+            goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+          }
+        } else if (mv.size() === 1){
+          const m = mv.get(0);
+          if (m.distance < 40) goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+        }
+        mv.delete();
+        if (goodMatches.length >= MAX_GOOD_MATCHES) break;
       }
-      mv.delete();
-      if (goodMatches.length >= MAX_GOOD_MATCHES) break;
+      matches.delete();
     }
-    matches.delete();
 
+    console.log('Good matches:', goodMatches.length);
     if (goodMatches.length < minMatchCount){
       frameKeypoints.delete(); frameDescriptors.delete();
       ctx.clearRect(0,0,overlay.width, overlay.height);
@@ -461,15 +525,15 @@ function processFrame(now){
       return;
     }
 
-    // build points for homography: framePts (src) and templPts (dst)
+    // crear puntos para homography
     const srcPtsArr = []; const dstPtsArr = [];
     for (let i=0;i<goodMatches.length;i++){
       const gm = goodMatches[i];
       const q = gm.queryIdx, t = gm.trainIdx;
       const kpf = frameKeypoints.get(q);
       const kpt = templKeypoints.get(t);
-      srcPtsArr.push(kpf.pt.x, kpf.pt.y); // frame coordinates (proc scale)
-      dstPtsArr.push(kpt.pt.x, kpt.pt.y); // templ coordinates (templ scale)
+      srcPtsArr.push(kpf.pt.x, kpf.pt.y); // frame coords (proc scale)
+      dstPtsArr.push(kpt.pt.x, kpt.pt.y); // template coords
     }
 
     let srcMatPts = cv.matFromArray(goodMatches.length, 1, cv.CV_32FC2, srcPtsArr);
@@ -486,8 +550,7 @@ function processFrame(now){
     bigMatch.textContent = 'Matches: ' + goodMatches.length + ' | Inliers: ' + inliers;
 
     if (!H.empty() && inliers >= Math.max(4, Math.floor(goodMatches.length * 0.2))){
-      // Successful detection -> setup tracking arrays for optical flow
-      // build filtered arrays (only inliers)
+      // prepare for optical flow tracking: gather only inlier points
       const goodFramePts = [];
       const goodTemplPts = [];
       for (let i=0;i<mask.rows;i++){
@@ -497,7 +560,7 @@ function processFrame(now){
         }
       }
 
-      // set up prevGray, prevPts, templPts for optical flow
+      // setup prevGray, prevPts, templPts
       try{ if (prevGray){ prevGray.delete(); prevGray = null; } }catch(e){}
       try{ if (prevPts){ prevPts.delete(); prevPts = null; } }catch(e){}
       try{ if (templPts){ templPts.delete(); templPts = null; } }catch(e){}
@@ -508,7 +571,7 @@ function processFrame(now){
       trackingActive = true;
       lastTrackTime = performance.now();
 
-      // compute and show overlay once now (same as before)
+      // draw overlay now
       let H_inv = new cv.Mat(); cv.invert(H, H_inv, cv.DECOMP_LU);
       const tw = templGray.cols, th = templGray.rows;
       const tplCorners = cv.matFromArray(4,1,cv.CV_32FC2, [0,0, tw,0, tw,th, 0,th]);
@@ -540,13 +603,12 @@ function processFrame(now){
 
       showOverlayCentered(drawCX, drawCY, drawW, drawH, angleDeg);
 
-      // cleanup
       tplCorners.delete(); dstCorners.delete(); H_inv.delete();
     } else {
       hideOverlay();
     }
 
-    // cleanup detection mats
+    // cleanup
     srcMatPts.delete(); dstMatPts.delete(); mask.delete();
     if (H && !H.isDeleted) H.delete();
     frameKeypoints.delete(); frameDescriptors.delete();
@@ -565,7 +627,7 @@ startBtn.addEventListener('click', async ()=>{
   await startCamera();
 });
 
-/* cleanup */
+/* cleanup on unload */
 window.addEventListener('pagehide', ()=>{
   try {
     if (srcMat) { srcMat.delete(); srcMat = null; }
