@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Mejorado (distancia)</title>
+  <title>AR Camiseta - Centrado + Worker (fix coords)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -44,15 +44,14 @@
 const TARGET_URL = './ilustracion.png';
 const ANIM_URL = './Animacion.webm';
 
-// performance/thresholds
-let RES_SCALE = 0.70;     // **más alto** en Precisión para detectar a distancia
+// modes & thresholds
+let RES_SCALE = 0.70;
 let FRAME_SKIP = 2;
 let MODE = 'precision';
 
 const REQUIRED_MATCHES = 10;
 const REQUIRED_INLIERS = 8;
-const CENTROID_THRESHOLD = 0.18;
-
+const CENTROID_THRESHOLD = 0.20; // puedes bajar a 0.15 si quieres más estricto
 /* ---------------------------- */
 
 const cam = document.getElementById('cam');
@@ -144,28 +143,40 @@ function initWorker(){
   };
 }
 
-/* centroid + gating */
+/* NEW: improved mapping using video DOM rect (handles object-fit:cover cropping) */
 function handleWorkerResult(d){
   bigMatch.textContent = `Matches: ${d.matches} | Inliers: ${d.inliers}`;
 
+  // require corners and min thresholds
   if (!d.corners || d.matches < REQUIRED_MATCHES || d.inliers < REQUIRED_INLIERS){
     hideOverlay();
     return;
   }
 
-  const scaleX = overlay.width / procW;
-  const scaleY = overlay.height / procH;
+  // get video bounding rect (displayed area)
+  const vRect = cam.getBoundingClientRect();
+  // scale from proc coords -> displayed video coords
+  const scaleX_video = vRect.width / cam.videoWidth;
+  const scaleY_video = vRect.height / cam.videoHeight;
+  const videoLeft = vRect.left + window.scrollX;
+  const videoTop = vRect.top + window.scrollY;
+
+  // centroid in proc coords
   const cx_proc = (d.corners[0] + d.corners[2] + d.corners[4] + d.corners[6]) / 4.0;
   const cy_proc = (d.corners[1] + d.corners[3] + d.corners[5] + d.corners[7]) / 4.0;
-  const cx_screen = cx_proc * scaleX;
-  const cy_screen = cy_proc * scaleY;
 
-  const screenCenterX = overlay.width / 2;
-  const screenCenterY = overlay.height / 2;
+  // map to screen (page) coordinates using displayed video scaling + offset
+  const cx_screen = videoLeft + cx_proc * scaleX_video;
+  const cy_screen = videoTop + cy_proc * scaleY_video;
 
+  // screen center coords (page coords)
+  const screenCenterX = window.scrollX + (window.innerWidth / 2);
+  const screenCenterY = window.scrollY + (window.innerHeight / 2);
+
+  // normalized distance to center (0..1 relative to diagonal)
   const dx = cx_screen - screenCenterX;
   const dy = cy_screen - screenCenterY;
-  const diag = Math.hypot(overlay.width, overlay.height);
+  const diag = Math.hypot(window.innerWidth, window.innerHeight);
   const distNorm = Math.hypot(dx, dy) / diag;
 
   if (distNorm > CENTROID_THRESHOLD){
@@ -173,6 +184,7 @@ function handleWorkerResult(d){
     return;
   }
 
+  // ok -> show centered overlay (no rotation)
   const sizePx = Math.round(Math.min(window.innerWidth * 0.6, window.innerHeight * 0.6));
   showOverlayCenteredFixed(sizePx);
 }
@@ -180,6 +192,7 @@ function handleWorkerResult(d){
 /* send frame */
 async function sendFrameToWorker(){
   if (!streaming || !worker) return;
+  // update proc size if RES_SCALE changed
   const newW = Math.max(1, Math.floor(cam.videoWidth * RES_SCALE));
   const newH = Math.max(1, Math.floor(cam.videoHeight * RES_SCALE));
   if (newW !== procW || newH !== procH){ procW = newW; procH = newH; resizeCanvas(); worker.postMessage({type:'resize', procW, procH}); }
