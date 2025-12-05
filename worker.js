@@ -1,4 +1,4 @@
-// worker.js (estricto: más matches requeridos + envía template size)
+// worker.js (mejor detección a distancia: ORB más fuerte + plantillla mayor)
 self.importScripts('https://docs.opencv.org/4.x/opencv.js');
 
 let cvReady = false;
@@ -9,19 +9,18 @@ let procW=160, procH=120;
 let MODE='detection';
 let lastTrackTime = 0;
 
-// parámetros más estrictos
+// parámetros ajustados para distancia
 let MATCH_RATIO = 0.85;
-let MAX_GOOD_MATCHES = 200;
-let minMatchCount = 14;   // aumentamos
-let MIN_INLIERS_ABS = 10; // mínimo absoluto de inliers
-let INLIER_RATIO = 0.45;  // proporción mínima de inliers respecto goodMatches
+let MAX_GOOD_MATCHES = 400;
+let minMatchCount = 12;
+let MIN_INLIERS_ABS = 8;
+let INLIER_RATIO = 0.40;
 
 self.Module = self.Module || {};
 self.Module.onRuntimeInitialized = () => { cvReady = true; postMessage({type:'ready'}); };
 
 function safeDelete(m){ try{ if (m && typeof m.delete === 'function') m.delete(); }catch(e){} }
 
-// convierte ImageBitmap -> gray Mat usando OffscreenCanvas + matFromImageData
 function bitmapToGrayMat(bitmap, w=procW, h=procH){
   const oc = new OffscreenCanvas(w,h);
   const c = oc.getContext('2d');
@@ -35,7 +34,7 @@ function bitmapToGrayMat(bitmap, w=procW, h=procH){
   return gray;
 }
 
-async function loadImageToMatGrayscale(url, maxSize=1000){
+async function loadImageToMatGrayscale(url, maxSize=1400){
   const resp = await fetch(url);
   if (!resp.ok) throw new Error('HTTP '+resp.status);
   const blob = await resp.blob();
@@ -126,10 +125,9 @@ function homographyToCorners(H){
 
 async function initTemplate(url){
   safeDelete(templGray); safeDelete(templKeypoints); safeDelete(templDescriptors);
-  const {matGray, w, h} = await loadImageToMatGrayscale(url, 1000);
+  const {matGray, w, h} = await loadImageToMatGrayscale(url, 1400);
   templGray = matGray;
-  // init ORB & BF
-  try { orb = new cv.ORB(500, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
+  try { orb = new cv.ORB(1200, 1.2, 12, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
   bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
   templKeypoints = new cv.KeyPointVector();
   templDescriptors = new cv.Mat();
@@ -143,7 +141,6 @@ async function processFrameBitmap(bitmap){
   if (!cvReady || !templGray || !orb){ try{ bitmap.close(); }catch(e){} postMessage({type:'result', matches:0, inliers:0, corners:null}); return; }
   const grayMat = bitmapToGrayMat(bitmap, procW, procH);
 
-  // tracking path
   if (MODE === 'tracking' && prevGray && prevPts && templPts){
     try {
       const nextPts = new cv.Mat(), status = new cv.Mat(), err = new cv.Mat();
@@ -184,7 +181,6 @@ async function processFrameBitmap(bitmap){
           return;
         } else {
           try{ nextMat.delete(); templSub.delete(); mask.delete(); if (H && !H.isDeleted) H.delete(); }catch(e){}
-          // fall through to detection
         }
       }
     } catch(err){
@@ -193,7 +189,6 @@ async function processFrameBitmap(bitmap){
     }
   }
 
-  // detection path
   try {
     const det = detectAndCompute(grayMat);
     const frameKps = det.kps, frameDesc = det.desc;
@@ -227,7 +222,6 @@ async function processFrameBitmap(bitmap){
     } else {
       postMessage({type:'result', matches:goodMatches.length, inliers:inliers||0, corners:null});
     }
-
     safeDelete(frameKps); safeDelete(frameDesc);
     if (!(MODE === 'tracking' && prevGray)) safeDelete(grayMat);
     return;
