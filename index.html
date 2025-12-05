@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Mejorado (CLAHE + crossCheck + modos)</title>
+  <title>AR Camiseta - Mejorado (Match fix)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -54,13 +54,12 @@
 
 <script>
 /* ---------- CONFIG (AJUSTABLE) ---------- */
-/* Por defecto usamos una escala mayor (0.40) para pruebas — después podés reducir */
-let RES_SCALE = 0.40;        // escala de procesamiento (0.25..0.5 para pruebas)
+let RES_SCALE = 0.40;        // escala de procesamiento (pruebas)
 let FRAME_SKIP = 3;          // procesar 1 cada N frames
-let MATCH_RATIO = 0.9;       // ratio de Lowe (relajado para diagnosticar)
+let MATCH_RATIO = 0.9;       // ratio de Lowe (relajado)
 let minMatchCount = 6;
-let MAX_GOOD_MATCHES = 150;  // cap para matches (mayor en modo precisión)
-const MAX_TEMPL_SIZE = 800;  // CONSIDERA aumentar si tu template queda pequeño
+let MAX_GOOD_MATCHES = 150;  // cap para matches
+const MAX_TEMPL_SIZE = 800;
 const MIN_TRACK_POINTS = 6;
 const REDETECT_AFTER_SECONDS = 2.5;
 
@@ -97,8 +96,8 @@ let templPts = null;
 let lastValidHomography = null;
 let lastTrackTime = 0;
 
-/* matcher config (usar crossCheck por defecto) */
-let USE_CROSSCHECK = true;
+/* matcher config */
+let USE_CROSSCHECK = false; // por defecto false para usar knnMatch (evita problemas en builds web)
 
 /* UI helpers */
 function log(s){ logEl.textContent = s; console.log(s); }
@@ -144,7 +143,6 @@ testHide.addEventListener('click', ()=>{ hideOverlay(); });
 let currentMode = 'precision'; // 'precision' | 'speed'
 toggleModeBtn.addEventListener('click', ()=>{
   if (currentMode === 'precision'){
-    // pasar a modo velocidad
     currentMode = 'speed';
     RES_SCALE = 0.28;
     FRAME_SKIP = 4;
@@ -159,7 +157,7 @@ toggleModeBtn.addEventListener('click', ()=>{
     FRAME_SKIP = 3;
     MATCH_RATIO = 0.9;
     MAX_GOOD_MATCHES = 150;
-    USE_CROSSCHECK = true;
+    USE_CROSSCHECK = false;
     toggleModeBtn.textContent = 'Modo: Precisión';
     log('Modo Precisión activado');
   }
@@ -198,7 +196,6 @@ async function prepareOpenCV(){
   img.src = TARGET_URL + '?v=' + Date.now();
 
   img.onload = () => {
-    // draw template to temp canvas, and downscale if very large
     const tmp = document.createElement('canvas');
     let tw = img.width, th = img.height;
     if (Math.max(tw,th) > MAX_TEMPL_SIZE){
@@ -209,7 +206,6 @@ async function prepareOpenCV(){
     const tctx = tmp.getContext('2d');
     tctx.drawImage(img, 0, 0, tw, th);
 
-    // cleanup previous (si existía)
     try{ if (templKeypoints){ templKeypoints.delete(); templKeypoints = null; } }catch(e){}
     try{ if (templDescriptors){ templDescriptors.delete(); templDescriptors = null; } }catch(e){}
     try{ if (templMat){ templMat.delete(); templMat = null; } }catch(e){}
@@ -219,9 +215,9 @@ async function prepareOpenCV(){
     templGray = new cv.Mat();
     cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
 
-    // APPLY CLAHE (si disponible) para mejorar detección en zonas con poco contraste
+    // APPLY CLAHE (si disponible)
     try {
-      let clahe = new cv.CLAHE(2.0, new cv.Size(8,8)); // clipLimit, tileGridSize
+      let clahe = new cv.CLAHE(2.0, new cv.Size(8,8));
       let templGrayEq = new cv.Mat();
       clahe.apply(templGray, templGrayEq);
       templGray.delete();
@@ -230,11 +226,10 @@ async function prepareOpenCV(){
       console.log('CLAHE aplicado al template');
     } catch(e){ console.warn('CLAHE no disponible en esta build, se ignora', e); }
 
-    // init ORB & BFMatcher (con crossCheck opcional)
+    // init ORB & BFMatcher (USE_CROSSCHECK variable controla modo)
     try {
       try { orb = new cv.ORB(1000, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
-      if (USE_CROSSCHECK) bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
-      else bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+      bf = new cv.BFMatcher(cv.NORM_HAMMING, USE_CROSSCHECK ? true : false);
     } catch(e){
       console.warn('ORB/BF init error', e);
       try { orb = new cv.ORB(); bf = new cv.BFMatcher(cv.NORM_HAMMING, false); } catch(err){ console.error(err); }
@@ -474,25 +469,27 @@ function processFrame(now){
       return;
     }
 
-    // matching: si usamos crossCheck -> match(); si no -> knn + ratio
+    // matching: safe handling para builds que no exponen m.delete()
     let goodMatches = [];
     if (bf && USE_CROSSCHECK){
-      // bf created with crossCheck = true
+      // Uso de match() con verificación segura de propiedades del objeto devuelto
       try {
         let allMatches = new cv.DMatchVector();
         bf.match(frameDescriptors, templDescriptors, allMatches);
         for (let i=0;i<allMatches.size();i++){
           const m = allMatches.get(i);
-          // umbral absoluto (ajustable)
-          if (m.distance < 70){
-            goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+          if (m && typeof m.distance !== 'undefined'){
+            if (m.distance < 70){
+              goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+            }
           }
-          m.delete();
           if (goodMatches.length >= MAX_GOOD_MATCHES) break;
+          // NO llamamos a m.delete() aquí (puede no existir)
         }
-        allMatches.delete();
+        try{ allMatches.delete(); }catch(e){}
       } catch(e){ console.error('bf.match err', e); }
     } else {
+      // knnMatch con ratio test (comprobaciones seguras)
       let matches = new cv.DMatchVectorVector();
       try { bf.knnMatch(frameDescriptors, templDescriptors, matches, 2); }
       catch(e){ console.error('knnMatch err', e); }
@@ -500,17 +497,20 @@ function processFrame(now){
         const mv = matches.get(i);
         if (mv.size() >= 2){
           const m = mv.get(0), n = mv.get(1);
-          if (m.distance <= MATCH_RATIO * n.distance){
-            goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+          if (m && n && typeof m.distance !== 'undefined' && typeof n.distance !== 'undefined'){
+            if (m.distance <= MATCH_RATIO * n.distance){
+              goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+            }
           }
+          // no llamamos a m.delete() ni n.delete()
         } else if (mv.size() === 1){
           const m = mv.get(0);
-          if (m.distance < 40) goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
+          if (m && typeof m.distance !== 'undefined' && m.distance < 40) goodMatches.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
         }
-        mv.delete();
+        try{ mv.delete(); }catch(e){}
         if (goodMatches.length >= MAX_GOOD_MATCHES) break;
       }
-      matches.delete();
+      try{ matches.delete(); }catch(e){}
     }
 
     console.log('Good matches:', goodMatches.length);
