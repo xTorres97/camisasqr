@@ -1,4 +1,4 @@
-// worker.js (stricter matching thresholds; sends template size info to main)
+// worker.js (estricto: más matches requeridos + envía template size)
 self.importScripts('https://docs.opencv.org/4.x/opencv.js');
 
 let cvReady = false;
@@ -9,19 +9,19 @@ let procW=160, procH=120;
 let MODE='detection';
 let lastTrackTime = 0;
 
-// stricter params
+// parámetros más estrictos
 let MATCH_RATIO = 0.85;
 let MAX_GOOD_MATCHES = 200;
-let minMatchCount = 12; // require more good matches
-let MIN_INLIERS_ABS = 8; // absolute minimum inliers to accept
-let INLIER_RATIO = 0.4;  // require at least 40% inliers of goodMatches
+let minMatchCount = 14;   // aumentamos
+let MIN_INLIERS_ABS = 10; // mínimo absoluto de inliers
+let INLIER_RATIO = 0.45;  // proporción mínima de inliers respecto goodMatches
 
 self.Module = self.Module || {};
 self.Module.onRuntimeInitialized = () => { cvReady = true; postMessage({type:'ready'}); };
 
 function safeDelete(m){ try{ if (m && typeof m.delete === 'function') m.delete(); }catch(e){} }
 
-// convert bitmap -> gray mat using OffscreenCanvas + matFromImageData
+// convierte ImageBitmap -> gray Mat usando OffscreenCanvas + matFromImageData
 function bitmapToGrayMat(bitmap, w=procW, h=procH){
   const oc = new OffscreenCanvas(w,h);
   const c = oc.getContext('2d');
@@ -35,7 +35,7 @@ function bitmapToGrayMat(bitmap, w=procW, h=procH){
   return gray;
 }
 
-async function loadImageToMatGrayscale(url, maxSize=800){
+async function loadImageToMatGrayscale(url, maxSize=1000){
   const resp = await fetch(url);
   if (!resp.ok) throw new Error('HTTP '+resp.status);
   const blob = await resp.blob();
@@ -128,7 +128,7 @@ async function initTemplate(url){
   safeDelete(templGray); safeDelete(templKeypoints); safeDelete(templDescriptors);
   const {matGray, w, h} = await loadImageToMatGrayscale(url, 1000);
   templGray = matGray;
-  // ORB + BF init
+  // init ORB & BF
   try { orb = new cv.ORB(500, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
   bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
   templKeypoints = new cv.KeyPointVector();
@@ -136,7 +136,6 @@ async function initTemplate(url){
   try { orb.detect(templGray, templKeypoints); orb.compute(templGray, templKeypoints, templDescriptors); }
   catch(e){ try { orb.detectAndCompute(templGray, new cv.Mat(), templKeypoints, templDescriptors); } catch(err){ postMessage({type:'error', msg:'ORB detect fail '+err}); } }
   postMessage({type:'log', msg:`Template loaded KP:${templKeypoints.size()} desc:${templDescriptors.rows}`});
-  // send template size to main so overlay sizing can preserve aspect ratio
   postMessage({type:'templateInfo', w, h});
 }
 
@@ -144,7 +143,7 @@ async function processFrameBitmap(bitmap){
   if (!cvReady || !templGray || !orb){ try{ bitmap.close(); }catch(e){} postMessage({type:'result', matches:0, inliers:0, corners:null}); return; }
   const grayMat = bitmapToGrayMat(bitmap, procW, procH);
 
-  // tracking flow (try optical flow first if tracking)
+  // tracking path
   if (MODE === 'tracking' && prevGray && prevPts && templPts){
     try {
       const nextPts = new cv.Mat(), status = new cv.Mat(), err = new cv.Mat();
@@ -171,7 +170,6 @@ async function processFrameBitmap(bitmap){
         let inliers = 0; for (let i=0;i<mask.rows;i++) if (mask.ucharPtr(i,0)[0]) inliers++;
         if (H && !H.empty() && inliers >= Math.max(MIN_INLIERS_ABS, Math.floor(n*INLIER_RATIO))){
           const corners = homographyToCorners(H);
-          // update prevPts / templPts using mask
           const goodNextFiltered = [], goodTemplFiltered = [];
           for (let i=0;i<mask.rows;i++){
             if (mask.ucharPtr(i,0)[0]){ goodNextFiltered.push(goodNext[2*i], goodNext[2*i+1]); goodTemplFiltered.push(goodTempl[2*i], goodTempl[2*i+1]); }
@@ -186,7 +184,7 @@ async function processFrameBitmap(bitmap){
           return;
         } else {
           try{ nextMat.delete(); templSub.delete(); mask.delete(); if (H && !H.isDeleted) H.delete(); }catch(e){}
-          // continue to detection path
+          // fall through to detection
         }
       }
     } catch(err){
@@ -209,7 +207,6 @@ async function processFrameBitmap(bitmap){
     const {H, mask, inliers} = computeHomographyFromMatches(goodMatches, frameKps, templKeypoints);
     if (H && !H.empty() && inliers >= Math.max(MIN_INLIERS_ABS, Math.floor(goodMatches.length * INLIER_RATIO))){
       const corners = homographyToCorners(H);
-      // build arrays for tracking (only inliers)
       const framePtsArr = [], templPtsArr = [];
       for (let idx=0; idx<goodMatches.length; idx++){
         if (mask.ucharPtr(idx,0)[0]){
