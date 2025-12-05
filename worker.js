@@ -1,8 +1,4 @@
-// worker.js
-// Worker que carga OpenCV.js y realiza detección ORB + matching + optical flow
-// Recibe mensajes: {type:'init', targetUrl, procW, procH} y {type:'frame', bitmap}, {type:'resize'}
-// Devuelve: postMessage({type:'ready'}), postMessage({type:'result', matches, inliers, corners:[...]}), postMessage({type:'log', msg})
-
+// worker.js (corregido: usa ImageData -> cv.matFromImageData en lugar de cv.imread con HTML elements)
 self.importScripts('https://docs.opencv.org/4.x/opencv.js');
 
 let cvReady = false;
@@ -11,16 +7,11 @@ let templMat = null, templGray = null, templKeypoints = null, templDescriptors =
 let prevGray = null, prevPts = null, templPts = null;
 let procW = 160, procH = 120;
 let MODE = 'detection'; // 'detection' | 'tracking'
-let REDETECT_AFTER_MS = 2500;
 let lastTrackTime = 0;
+
 let MATCH_RATIO = 0.9;
 let MAX_GOOD_MATCHES = 150;
 let minMatchCount = 6;
-
-self.cv = self.cv || {}; // guard
-self.postMessage({type:'log', msg:'worker loaded, waiting cv...'});
-
-self.cv = self.cv || {};
 
 self.Module = self.Module || {};
 self.Module.onRuntimeInitialized = () => {
@@ -28,103 +19,78 @@ self.Module.onRuntimeInitialized = () => {
   postMessage({type:'ready'});
 };
 
-// Helper: load image from URL into cv.Mat (in worker)
-async function loadImageToMat(url, maxSize=800){
-  const resp = await fetch(url);
-  const blob = await resp.blob();
-  const imgBitmap = await createImageBitmap(blob);
-  // draw into offscreen canvas
-  const oc = new OffscreenCanvas(imgBitmap.width, imgBitmap.height);
-  const cx = oc.getContext('2d');
-  cx.drawImage(imgBitmap, 0, 0);
-  let tw = imgBitmap.width, th = imgBitmap.height;
-  if (Math.max(tw, th) > maxSize){
-    const s = maxSize / Math.max(tw, th);
-    tw = Math.round(tw * s); th = Math.round(th * s);
-    const oc2 = new OffscreenCanvas(tw, th);
-    const c2 = oc2.getContext('2d');
-    c2.drawImage(imgBitmap, 0, 0, tw, th);
-    const mat = cv.imread(oc2);
-    imgBitmap.close();
-    return mat;
-  } else {
-    const mat = cv.imread(oc);
-    imgBitmap.close();
-    return mat;
-  }
-}
-
+// safe delete helper
 function safeDelete(m){
   try{ if (m && typeof m.delete === 'function') m.delete(); }catch(e){}
 }
 
-async function initTemplate(url){
-  safeDelete(templMat); safeDelete(templGray); safeDelete(templKeypoints); safeDelete(templDescriptors);
-  templMat = await loadImageToMat(url, 800);
-  templGray = new cv.Mat();
-  cv.cvtColor(templMat, templGray, cv.COLOR_RGBA2GRAY);
-
-  // try CLAHE (if available)
-  try {
-    let clahe = new cv.CLAHE(2.0, new cv.Size(8,8));
-    let tmp = new cv.Mat();
-    clahe.apply(templGray, tmp);
-    templGray.delete(); templGray = tmp;
-    clahe.delete();
-    postMessage({type:'log', msg:'CLAHE applied to template'});
-  } catch(e){ /* ignore */ }
-
-  // init ORB and BF
-  try {
-    orb = new cv.ORB(600, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20);
-  } catch(e){
-    orb = new cv.ORB();
-  }
-  bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
-
-  templKeypoints = new cv.KeyPointVector();
-  templDescriptors = new cv.Mat();
-  try {
-    orb.detect(templGray, templKeypoints);
-    orb.compute(templGray, templKeypoints, templDescriptors);
-  } catch(e){
-    try { orb.detectAndCompute(templGray, new cv.Mat(), templKeypoints, templDescriptors); } catch(err){ postMessage({type:'error', msg:'ORB detect failed on template: '+err}); return; }
-  }
-  postMessage({type:'log', msg:`Template loaded KP:${templKeypoints.size()} desc:${templDescriptors.rows}`});
-}
-
-// Convert ImageBitmap -> cv.Mat (grayscale) using OffscreenCanvas
-function bitmapToGrayMat(bitmap){
-  const oc = new OffscreenCanvas(procW, procH);
-  const c = oc.getContext('2d');
-  c.drawImage(bitmap, 0, 0, procW, procH);
-  // transfer bitmap closed by main
-  const mat = cv.imread(oc);
-  const g = new cv.Mat();
-  cv.cvtColor(mat, g, cv.COLOR_RGBA2GRAY);
+// --- NEW: convertir ImageBitmap -> cv.Mat (grayscale) sin usar cv.imread(HTMLImageElement)
+// dibuja ImageBitmap en OffscreenCanvas, obtiene ImageData y usa cv.matFromImageData
+function bitmapToGrayMat(bitmap, w = procW, h = procH){
+  // create offscreen canvas sized to procW x procH
+  const oc = new OffscreenCanvas(w, h);
+  const ctx = oc.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  // obtener ImageData
+  const id = ctx.getImageData(0, 0, w, h);
+  // convertir a Mat RGBA
+  const mat = cv.matFromImageData(id); // mat tipo CV_8UC4
+  const gray = new cv.Mat();
+  cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
   mat.delete();
-  return g; // caller must delete
+  return gray; // caller must delete
 }
 
-// Do ORB detect+compute on a gray mat (returns keypoints vector and descriptors mat)
+// --- NEW: carga template desde URL -> cv.Mat usando fetch + createImageBitmap + matFromImageData
+async function loadImageToMat(url, maxSize=800){
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const blob = await resp.blob();
+    const imgBitmap = await createImageBitmap(blob);
+    // calcular tamaño target (mantener aspect)
+    let tw = imgBitmap.width, th = imgBitmap.height;
+    if (Math.max(tw, th) > maxSize){
+      const s = maxSize / Math.max(tw, th);
+      tw = Math.round(tw * s);
+      th = Math.round(th * s);
+    }
+    // dibujar en OffscreenCanvas a tamaño tw x th
+    const oc = new OffscreenCanvas(tw, th);
+    const ctx = oc.getContext('2d');
+    ctx.drawImage(imgBitmap, 0, 0, tw, th);
+    const id = ctx.getImageData(0,0,tw,th);
+    const matRGBA = cv.matFromImageData(id); // CV_8UC4
+    const mat = new cv.Mat();
+    cv.cvtColor(matRGBA, mat, cv.COLOR_RGBA2GRAY); // keep grayscale template
+    matRGBA.delete();
+    try{ imgBitmap.close(); }catch(e){}
+    return mat; // caller deletes
+  } catch(err){
+    postMessage({type:'error', msg:'loadImageToMat error: '+err});
+    throw err;
+  }
+}
+
+// ORB detect+compute helper
 function detectAndCompute(grayMat){
-  let kps = new cv.KeyPointVector();
-  let desc = new cv.Mat();
+  const kps = new cv.KeyPointVector();
+  const desc = new cv.Mat();
   try {
     orb.detect(grayMat, kps);
     orb.compute(grayMat, kps, desc);
   } catch(e){
-    try { orb.detectAndCompute(grayMat, new cv.Mat(), kps, desc); } catch(err){ postMessage({type:'log', msg:'detectAndCompute failed '+err}); }
+    try { orb.detectAndCompute(grayMat, new cv.Mat(), kps, desc); } catch(err){ postMessage({type:'log', msg:'detectAndCompute failed: '+err}); }
   }
   return {kps, desc};
 }
 
-// knn matching + ratio test -> returns array of {queryIdx, trainIdx, distance}
+// knn + ratio test
 function knnGoodMatches(des1, des2, ratio=0.9, maxMatches=150){
   const good = [];
   let matches = new cv.DMatchVectorVector();
   try { bf.knnMatch(des1, des2, matches, 2); }
-  catch(e){ postMessage({type:'log', msg:'knnMatch error: '+e}); try{ matches.delete(); }catch(e){} return good; }
+  catch(e){ postMessage({type:'log', msg:'knnMatch error: '+e}); try{ matches.delete(); }catch(_){ } return good; }
   for (let i=0;i<matches.size();i++){
     const mv = matches.get(i);
     if (mv.size() >= 2){
@@ -134,7 +100,6 @@ function knnGoodMatches(des1, des2, ratio=0.9, maxMatches=150){
           good.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
         }
       }
-      // no m.delete() safe call (build dependent)
     } else if (mv.size() === 1){
       const m = mv.get(0);
       if (typeof m.distance !== 'undefined' && m.distance < 40) good.push({queryIdx: m.queryIdx, trainIdx: m.trainIdx, distance: m.distance});
@@ -146,7 +111,6 @@ function knnGoodMatches(des1, des2, ratio=0.9, maxMatches=150){
   return good;
 }
 
-// Build homography from good matches given kpsFrame and templKeypoints
 function computeHomographyFromMatches(goodMatches, frameKps, templKps){
   const src = []; const dst = [];
   for (let i=0;i<goodMatches.length;i++){
@@ -163,19 +127,17 @@ function computeHomographyFromMatches(goodMatches, frameKps, templKps){
   let H = null;
   try {
     H = cv.findHomography(srcMat, dstMat, cv.RANSAC, 5.0, mask);
-  } catch(e){ postMessage({type:'log', msg:'findHomography failed '+e}); }
-  // count inliers
+  } catch(e){
+    postMessage({type:'log', msg:'findHomography failed: '+e});
+  }
   let inliers = 0;
   if (mask && !mask.isDeleted()){
     for (let i=0;i<mask.rows;i++) if (mask.ucharPtr(i,0)[0]) inliers++;
   }
-  // cleanup
   try{ srcMat.delete(); dstMat.delete(); }catch(e){}
   return {H, mask, inliers};
 }
 
-// Given H (frame->templ) produce corners in frame-coords (proc-space)
-// We'll invert H to map template -> frame, consistent with main earlier
 function homographyToCorners(H){
   if (!H) return null;
   try {
@@ -192,33 +154,63 @@ function homographyToCorners(H){
     tplCorners.delete(); dstCorners.delete(); H_inv.delete();
     return out;
   } catch(e){
-    postMessage({type:'log', msg:'homographyToCorners err '+e});
+    postMessage({type:'log', msg:'homographyToCorners err: '+e});
     return null;
   }
 }
 
-// === main frame processing function ===
-// Input: ImageBitmap sent from main, already sized to procW x procH
+// init template (uses new loadImageToMat)
+async function initTemplate(url){
+  safeDelete(templMat); safeDelete(templGray); safeDelete(templKeypoints); safeDelete(templDescriptors);
+  templGray = await loadImageToMat(url, 800);
+  if (!templGray) throw new Error('templGray null');
+  // apply CLAHE if available (try/catch)
+  try {
+    const clahe = new cv.CLAHE(2.0, new cv.Size(8,8));
+    const tmp = new cv.Mat();
+    clahe.apply(templGray, tmp);
+    templGray.delete();
+    templGray = tmp;
+    clahe.delete();
+    postMessage({type:'log', msg:'CLAHE applied to template'});
+  } catch(e){ /* ignore */ }
+
+  // create templMat just for dimensions if needed (we can derive cols/rows from templGray)
+  templMat = new cv.Mat();
+  cv.cvtColor(templGray, templMat, cv.COLOR_GRAY2RGBA); // a CV_8UC4 mat if ever needed
+  // init ORB and BF
+  try { orb = new cv.ORB(600, 1.2, 8, 31, 0, 2, cv.ORB_HARRIS_SCORE, 31, 20); } catch(e){ orb = new cv.ORB(); }
+  bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+
+  templKeypoints = new cv.KeyPointVector();
+  templDescriptors = new cv.Mat();
+  try { orb.detect(templGray, templKeypoints); orb.compute(templGray, templKeypoints, templDescriptors); }
+  catch(e){
+    try { orb.detectAndCompute(templGray, new cv.Mat(), templKeypoints, templDescriptors); } catch(err){ postMessage({type:'error', msg:'ORB detect failed: '+err}); }
+  }
+
+  postMessage({type:'log', msg:`Template loaded KP:${templKeypoints.size()} desc:${templDescriptors.rows}`});
+}
+
+// main processing of ImageBitmap (now using bitmapToGrayMat)
 async function processFrameBitmap(bitmap){
-  if (!cvReady || !templGray || !orb) {
-    safeDelete(bitmap);
+  if (!cvReady || !templGray || !orb){
+    try{ bitmap.close(); }catch(e){}
     postMessage({type:'result', matches:0, inliers:0, corners:null});
     return;
   }
 
-  // convert bitmap -> gray mat
-  const grayMat = bitmapToGrayMat(bitmap);
+  const grayMat = bitmapToGrayMat(bitmap, procW, procH);
   try{ bitmap.close(); }catch(e){}
 
+  // tracking path
   if (MODE === 'tracking' && prevGray && prevPts && templPts){
-    // try optical flow
     try {
       const nextPts = new cv.Mat();
       const status = new cv.Mat();
       const err = new cv.Mat();
       cv.calcOpticalFlowPyrLK(prevGray, grayMat, prevPts, nextPts, status, err, new cv.Size(21,21), 3);
 
-      // collect good points
       const goodNext = []; const goodTempl = [];
       for (let i=0;i<status.rows;i++){
         if (status.ucharPtr(i,0)[0] === 1){
@@ -228,29 +220,25 @@ async function processFrameBitmap(bitmap){
           goodNext.push(nx, ny); goodTempl.push(tx, ty);
         }
       }
-
       nextPts.delete(); status.delete(); err.delete();
 
       if (goodNext.length/2 < 6){
-        // tracking lost, fallback to detection
         MODE = 'detection';
-        safeDelete(prevGray); safeDelete(prevPts); safeDelete(templPts);
-        prevGray = null; prevPts = null; templPts = null;
+        safeDelete(prevPts); safeDelete(prevGray); safeDelete(templPts);
+        prevPts = null; prevGray = null; templPts = null;
         postMessage({type:'log', msg:'tracking lost -> detection'});
-        // continue to detection below (so we don't return early)
       } else {
-        // compute homography from next->templ
-        const nextMat = cv.matFromArray(goodNext.length/2, 1, cv.CV_32FC2, goodNext);
-        const templSub = cv.matFromArray(goodTempl.length/2, 1, cv.CV_32FC2, goodTempl);
+        const n = goodNext.length/2;
+        const nextMat = cv.matFromArray(n, 1, cv.CV_32FC2, goodNext);
+        const templSub = cv.matFromArray(n, 1, cv.CV_32FC2, goodTempl);
         const mask = new cv.Mat();
         let H = null;
-        try { H = cv.findHomography(nextMat, templSub, cv.RANSAC, 5.0, mask); } catch(e){ postMessage({type:'log', msg:'findHomography flow err '+e}); }
-        let inliers = 0; if (mask){ for (let i=0;i<mask.rows;i++) if (mask.ucharPtr(i,0)[0]) inliers++; }
-        let corners = null;
-        if (H && !H.empty() && inliers >= Math.max(4, Math.floor((goodNext.length/2)*0.25))){
-          corners = homographyToCorners(H);
-          postMessage({type:'result', matches: goodNext.length/2, inliers, corners});
-          // update prevPts with inlier filtered points (build new prevPts & templPts)
+        try { H = cv.findHomography(nextMat, templSub, cv.RANSAC, 5.0, mask); } catch(e){ postMessage({type:'log', msg:'findHomography(flow) err: '+e}); }
+        let inliers = 0;
+        for (let i=0;i<mask.rows;i++) if (mask.ucharPtr(i,0)[0]) inliers++;
+        if (H && !H.empty() && inliers >= Math.max(4, Math.floor(n * 0.25))){
+          const corners = homographyToCorners(H);
+          // build filtered prevPts & templPts from mask
           const goodNextFiltered = []; const goodTemplFiltered = [];
           for (let i=0;i<mask.rows;i++){
             if (mask.ucharPtr(i,0)[0]){
@@ -259,15 +247,16 @@ async function processFrameBitmap(bitmap){
             }
           }
           safeDelete(prevPts); safeDelete(prevGray);
-          prevPts = cv.matFromArray(goodNextFiltered.length/2, 1, cv.CV_32FC2, goodNextFiltered);
-          templPts = cv.matFromArray(goodTemplFiltered.length/2, 1, cv.CV_32FC2, goodTemplFiltered);
+          prevPts = cv.matFromArray(goodNextFiltered.length/2,1,cv.CV_32FC2, goodNextFiltered);
+          templPts = cv.matFromArray(goodTemplFiltered.length/2,1,cv.CV_32FC2, goodTemplFiltered);
           prevGray = grayMat.clone();
           lastTrackTime = performance.now();
+          postMessage({type:'result', matches:n, inliers, corners});
           // cleanup
           try{ nextMat.delete(); templSub.delete(); mask.delete(); if (H && !H.isDeleted) H.delete(); }catch(e){}
           return;
         } else {
-          // fallback to detection path (below) - cleanup temporals
+          // fallback to detection; cleanup temporals
           try{ nextMat.delete(); templSub.delete(); mask.delete(); if (H && !H.isDeleted) H.delete(); }catch(e){}
           // continue to detection
         }
@@ -275,12 +264,12 @@ async function processFrameBitmap(bitmap){
     } catch(err){
       postMessage({type:'log', msg:'optical flow exception: '+err});
       MODE = 'detection';
-      safeDelete(prevGray); safeDelete(prevPts); safeDelete(templPts);
-      prevGray = null; prevPts = null; templPts = null;
+      safeDelete(prevPts); safeDelete(prevGray); safeDelete(templPts);
+      prevPts = null; prevGray = null; templPts = null;
     }
   }
 
-  // DETECTION path (ORB + matching)
+  // DETECTION: ORB + knn + homography
   try {
     const det = detectAndCompute(grayMat);
     const frameKps = det.kps; const frameDesc = det.desc;
@@ -288,7 +277,6 @@ async function processFrameBitmap(bitmap){
     const frmK = frameKps ? frameKps.size() : 0;
 
     if (!tplK || !frmK){
-      // cleanup
       safeDelete(frameKps); safeDelete(frameDesc); safeDelete(grayMat);
       postMessage({type:'result', matches:0, inliers:0, corners:null});
       return;
@@ -301,24 +289,12 @@ async function processFrameBitmap(bitmap){
       return;
     }
 
-    // compute homography
     const {H, mask, inliers} = computeHomographyFromMatches(goodMatches, frameKps, templKeypoints);
     let corners = null;
     if (H && !H.empty() && inliers >= Math.max(4, Math.floor(goodMatches.length * 0.2))){
       corners = homographyToCorners(H);
 
-      // prepare tracking mats: prevPts (frame points) and templPts (template points) only using inliers
-      const goodFramePts = []; const goodTemplPts = [];
-      for (let i=0;i<mask.rows;i++){
-        if (mask.ucharPtr(i,0)[0]){
-          // goodMatches[i] corresponds to match; but mask corresponds to order in matFromArray earlier:
-          // we built src/dst arrays in same order as goodMatches, so index aligns
-          goodFramePts.push(frameKps.get(i).pt.x, frameKps.get(i).pt.y);
-          // BUT frameKps.get(i) is wrong — mapping must use queryIdx/trainIdx indices:
-          // Rebuild properly:
-        }
-      }
-      // Above approach risks mismatch; instead rebuild arrays from goodMatches & mask:
+      // build arrays for prevPts & templPts using goodMatches & mask
       const framePtsArr = [];
       const templPtsArr = [];
       for (let idx=0; idx<goodMatches.length; idx++){
@@ -332,7 +308,6 @@ async function processFrameBitmap(bitmap){
         }
       }
 
-      // set tracking mats
       safeDelete(prevPts); safeDelete(prevGray); safeDelete(templPts);
       if (framePtsArr.length/2 >= 6){
         prevPts = cv.matFromArray(framePtsArr.length/2, 1, cv.CV_32FC2, framePtsArr);
@@ -341,7 +316,6 @@ async function processFrameBitmap(bitmap){
         MODE = 'tracking';
         lastTrackTime = performance.now();
       } else {
-        // not enough points to start reliable tracking: remain in detection
         MODE = 'detection';
       }
 
@@ -350,46 +324,45 @@ async function processFrameBitmap(bitmap){
       postMessage({type:'result', matches:goodMatches.length, inliers:inliers||0, corners:null});
     }
 
-    // cleanup
     safeDelete(frameKps); safeDelete(frameDesc);
-    safeDelete(H); try{ if (mask) mask.delete(); }catch(e){}
-    // keep grayMat if tracking started (we cloned into prevGray), else delete
-    if (!(MODE==='tracking' && prevGray)) { safeDelete(grayMat); }
+    // if we didn't keep grayMat for tracking, delete it
+    if (!(MODE === 'tracking' && prevGray)) safeDelete(grayMat);
     return;
-  } catch(e){
-    postMessage({type:'log', msg:'detection error: '+e});
+  } catch(err){
+    postMessage({type:'log', msg:'detection error: '+err});
     safeDelete(grayMat);
     postMessage({type:'result', matches:0, inliers:0, corners:null});
     return;
   }
 }
 
-// message handler
+// message handling
 self.onmessage = async (ev) => {
   const d = ev.data;
   if (d.type === 'init'){
-    // wait cvReady
+    // wait cv runtime
     if (!cvReady){
-      postMessage({type:'log', msg:'waiting cv runtime...'});
-      // busy-wait small loop (up to a few seconds)
       let waited = 0;
       while(!cvReady && waited < 8000){ await new Promise(r=>setTimeout(r,100)); waited+=100; }
-      if (!cvReady){ postMessage({type:'error', msg:'OpenCV runtime did not initialize'}); return; }
+      if (!cvReady){ postMessage({type:'error', msg:'OpenCV runtime not initialized'}); return; }
     }
     procW = d.procW || procW; procH = d.procH || procH;
-    await initTemplate(d.targetUrl);
-    postMessage({type:'log', msg:'template initialized in worker'});
+    try {
+      await initTemplate(d.targetUrl);
+      postMessage({type:'log', msg:'template initialized in worker'});
+    } catch(e){
+      postMessage({type:'error', msg:'initTemplate failed: '+e});
+    }
     return;
   } else if (d.type === 'resize'){
     procW = d.procW; procH = d.procH;
     postMessage({type:'log', msg:`worker resized to ${procW}x${procH}`});
     return;
   } else if (d.type === 'frame'){
-    // receive ImageBitmap (transfered ownership)
+    // frame is transferred as bitmap (transfer ownership)
     const bitmap = d.bitmap || ev.data.bitmap;
     if (!bitmap){
-      postMessage({type:'log', msg:'no bitmap in message'});
-      return;
+      postMessage({type:'log', msg:'no bitmap in message'}); return;
     }
     await processFrameBitmap(bitmap);
   }
