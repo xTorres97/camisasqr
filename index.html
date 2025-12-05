@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>AR Camiseta - Worker (Centered, stricter match)</title>
+  <title>AR Camiseta - Centrado + Worker (estricto)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:Arial, sans-serif}
@@ -48,11 +48,16 @@
 /* ---------- CONFIG ---------- */
 const TARGET_URL = './ilustracion.png';
 const ANIM_URL = './Animacion.webm';
+
+// performance modes
 let RES_SCALE = 0.40;     // escala de procesamiento (ajusta)
 let FRAME_SKIP = 3;
 let MODE = 'precision';   // 'precision'|'speed'
-const REQUIRED_MATCHES = 10;    // número mínimo de good matches para considerar detección válida
-const REQUIRED_INLIERS = 8;     // inliers mínimos
+
+// gating y centroid
+const REQUIRED_MATCHES = 10;    // matches minimos
+const REQUIRED_INLIERS = 8;     // inliers minimos
+const CENTROID_THRESHOLD = 0.18; // distancia normalizada (0..1) al centro para permitir mostrar overlay
 /* ---------------------------- */
 
 const cam = document.getElementById('cam');
@@ -72,7 +77,7 @@ let streaming = false;
 let procW = 1, procH = 1;
 let offscreenForTransfer = null;
 let frameCounter = 0;
-let templW = 0, templH = 0; // recibidos desde worker
+let templW = 0, templH = 0; // plantilla size que envía worker
 
 function log(s){ logEl.textContent = s; console.log(s); }
 
@@ -83,19 +88,17 @@ const overlayVideoMarkup = (filename) => `
   </video>`;
 
 function showOverlayCenteredFixed(sizePx){
-  // center the overlayContainer (CSS already centers). Set width/height preserving aspect ratio from templW/templH
+  // calcula tamaño respetando aspecto de template
   let w = sizePx;
-  let h = Math.round(sizePx * (templH / templW));
-  // if templ dims unknown fallback to square
+  let h = Math.round(sizePx * (templH && templW ? (templH / templW) : 1));
   if (!templW || !templH) { h = w; }
-  const fx = document.getElementById('fxVideo');
-  if (!fx) overlayContainer.innerHTML = overlayVideoMarkup(ANIM_URL);
+  if (!document.getElementById('fxVideo')) overlayContainer.innerHTML = overlayVideoMarkup(ANIM_URL);
   const v = document.getElementById('fxVideo');
   overlayContainer.style.width = Math.max(10, w) + 'px';
   overlayContainer.style.height = Math.max(10, h) + 'px';
   overlayContainer.style.display = 'block';
   overlayContainer.style.visibility = 'visible';
-  try { v.play().then(()=>{ log('video play ok'); forcePlay.style.display='none'; }).catch(e=>{ log('autoplay err')}); } catch(e){}
+  try { v.play().then(()=>{ log('video play ok'); forcePlay.style.display='none'; }).catch(e=>{ log('autoplay err'); forcePlay.style.display='block'; }); } catch(e){}
 }
 function hideOverlay(){ const fx = document.getElementById('fxVideo'); if (fx) try{ fx.pause(); }catch(e){} overlayContainer.style.display='none'; overlayContainer.style.visibility='hidden'; }
 
@@ -109,10 +112,9 @@ toggleMode.addEventListener('click', ()=>{
   } else {
     MODE = 'precision'; RES_SCALE = 0.40; FRAME_SKIP = 3; toggleMode.textContent = 'Modo: Precisión'; log('Modo precisión');
   }
-  // on next frame procW/procH will be recomputed
+  // reinit sizes next frame
 });
 
-/* camera start */
 startBtn.addEventListener('click', async ()=>{ startBtn.style.display='none'; log('Activando cámara...'); await startCamera(); });
 
 async function startCamera(){
@@ -153,20 +155,44 @@ function initWorker(){
   };
 }
 
-/* handle results: now center video, no rotation; only show when good enough */
+/* reemplazamos por la versión con centroid gating */
 function handleWorkerResult(d){
+  // d: {matches, inliers, corners: [x0,y0,...] | null}
   bigMatch.textContent = `Matches: ${d.matches} | Inliers: ${d.inliers}`;
-  // stricter gating
-  if (d.matches >= REQUIRED_MATCHES && d.inliers >= REQUIRED_INLIERS){
-    // pick a visible size based on screen width (half screen), but clamp if template aspect extreme
-    const sizePx = Math.round(Math.min(window.innerWidth * 0.6, window.innerHeight * 0.6));
-    showOverlayCenteredFixed(sizePx);
-  } else {
+
+  if (!d.corners || d.matches < REQUIRED_MATCHES || d.inliers < REQUIRED_INLIERS){
     hideOverlay();
+    return;
   }
+
+  // calcular centroid en proc coords y mapear a pantalla coords
+  const scaleX = overlay.width / procW;
+  const scaleY = overlay.height / procH;
+  const cx_proc = (d.corners[0] + d.corners[2] + d.corners[4] + d.corners[6]) / 4.0;
+  const cy_proc = (d.corners[1] + d.corners[3] + d.corners[5] + d.corners[7]) / 4.0;
+  const cx_screen = cx_proc * scaleX;
+  const cy_screen = cy_proc * scaleY;
+
+  const screenCenterX = overlay.width / 2;
+  const screenCenterY = overlay.height / 2;
+
+  const dx = cx_screen - screenCenterX;
+  const dy = cy_screen - screenCenterY;
+  const diag = Math.hypot(overlay.width, overlay.height);
+  const distNorm = Math.hypot(dx, dy) / diag;
+
+  if (distNorm > CENTROID_THRESHOLD){
+    // marker detectado pero no centrado: no mostramos
+    hideOverlay();
+    return;
+  }
+
+  // ok: mostrar overlay centrado (sin rotación) con tamaño razonable
+  const sizePx = Math.round(Math.min(window.innerWidth * 0.6, window.innerHeight * 0.6));
+  showOverlayCenteredFixed(sizePx);
 }
 
-/* send downscaled frame to worker */
+/* send frame downscaled to worker */
 async function sendFrameToWorker(){
   if (!streaming || !worker) return;
   // recompute proc size if RES_SCALE changed
@@ -175,7 +201,7 @@ async function sendFrameToWorker(){
   if (newW !== procW || newH !== procH){ procW = newW; procH = newH; resizeCanvas(); worker.postMessage({type:'resize', procW, procH}); }
 
   try {
-    let ctx2 = offscreenForTransfer.getContext('2d');
+    const ctx2 = offscreenForTransfer.getContext('2d');
     ctx2.drawImage(cam, 0, 0, procW, procH);
     let bitmap;
     if (offscreenForTransfer.transferToImageBitmap){
@@ -190,7 +216,7 @@ async function sendFrameToWorker(){
   }
 }
 
-/* scheduling */
+/* scheduling loop */
 function scheduleFrame(){
   if (!streaming) return;
   frameCounter = (frameCounter + 1) % FRAME_SKIP;
@@ -206,7 +232,6 @@ window.addEventListener('pagehide', ()=>{
   try{ if (worker) worker.terminate(); }catch(e){}
   try{ const s = cam.srcObject; if (s) s.getTracks().forEach(t=>t.stop()); }catch(e){}
 });
-
 </script>
 </body>
 </html>
